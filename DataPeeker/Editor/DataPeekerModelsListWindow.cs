@@ -6,6 +6,7 @@ using UnityEditor;
 using UnityEngine;
 using Game.Model;
 using Game.Presentation.Managers.Behaviours;
+using UnityEditor.Localization.Plugins.XLIFF.V12;
 
 public class DataPeekerModelsListWindow : EditorWindow
 {
@@ -18,6 +19,8 @@ public class DataPeekerModelsListWindow : EditorWindow
     }
 
     private List<Type> modelTypes = new List<Type>();
+    private List<Type> filteredModelTypes;
+    private string searchTerm = "";
     private Vector2 scrollPosition;
 
     private void OnEnable()
@@ -34,14 +37,31 @@ public class DataPeekerModelsListWindow : EditorWindow
 
     private void OnGUI()
     {
-        if (modelTypes.Count == 0)
+        GUILayout.BeginHorizontal(GUI.skin.FindStyle("Toolbar"));
+        string newSearchTerm = GUILayout.TextField(searchTerm, GUI.skin.FindStyle("ToolbarSearchTextField"));
+        if (GUILayout.Button("", GUI.skin.FindStyle("ToolbarSearchCancelButton")))
         {
-            EditorGUILayout.LabelField("No models found implementing IReadOnlyModel.");
+            newSearchTerm = "";
+            GUI.FocusControl(null);
+        }
+
+        GUILayout.EndHorizontal();
+        GUILayout.Space(15f);
+
+        if (newSearchTerm != searchTerm)
+        {
+            searchTerm = newSearchTerm;
+            UpdateFilteredModelTypes();
+        }
+
+        if (filteredModelTypes.Count == 0)
+        {
+            EditorGUILayout.LabelField("No matching models found.");
             return;
         }
 
         scrollPosition = EditorGUILayout.BeginScrollView(scrollPosition);
-        foreach (Type modelType in modelTypes)
+        foreach (Type modelType in filteredModelTypes)
         {
             if (GUILayout.Button(modelType.Name))
             {
@@ -90,6 +110,21 @@ public class DataPeekerModelsListWindow : EditorWindow
         }
 
         modelTypes.Sort((type1, type2) => type1.Name.CompareTo(type2.Name));
+        UpdateFilteredModelTypes();
+    }
+
+    private void UpdateFilteredModelTypes()
+    {
+        if (string.IsNullOrEmpty(searchTerm))
+        {
+            filteredModelTypes = new List<Type>(modelTypes);
+        }
+        else
+        {
+            filteredModelTypes = modelTypes
+                .Where(type => type.Name.IndexOf(searchTerm, StringComparison.OrdinalIgnoreCase) >= 0)
+                .ToList();
+        }
     }
 
     private void OnPlayModeStateChanged(PlayModeStateChange state)
