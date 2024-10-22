@@ -1,6 +1,6 @@
 {
 	"name": "com.kjub.datapeeker",
-	"version": "0.1.0",
+	"version": "0.1.2",
 	"displayName": "Data Peeker",
 	"description": "Data Peeker is an advanced Unity Editor tool designed to enhance your workflow by providing a detailed, searchable view of your game's data models. It allows developers to dynamically inspect and interact with object hierarchies, offering insights into complex data structures through a user-friendly interface. Perfect for debugging and refining game mechanics, this tool streamlines the process of working with serialized data, lists, and dictionaries in real-time.",
 	"unity": "2022.3",
