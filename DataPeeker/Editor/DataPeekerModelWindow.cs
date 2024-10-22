@@ -14,14 +14,12 @@ public class DataPeekerModelWindow : EditorWindow
 {
     private static Dictionary<Type, DataPeekerModelWindow> openWindows = new Dictionary<Type, DataPeekerModelWindow>();
     private static Dictionary<Type, (FieldInfo[], PropertyInfo[])> typeCache = new Dictionary<Type, (FieldInfo[], PropertyInfo[])>();
-    private List<DataPeekerModelItem> _modelItems;
 
     private Type _modelType;
     private object _modelInstance;
     private bool _isDefaultInstance;
     private Vector2 _scrollPosition;
     private HashSet<object> _visitedObjects = new HashSet<object>();
-   
 
     private Color _color1 = new Color(0.9f, 0.9f, 0.9f);
     private Color _color2 = new Color(0.2f, 0.2f, 0.2f);
@@ -34,11 +32,101 @@ public class DataPeekerModelWindow : EditorWindow
     private string _searchTerm = "";
     private string _previousSearchTerm = "";
     private bool _searchEnabled = true;
-    
+
     private DataPeekerModelItem _root;
     private List<DataPeekerModelItem> _endElements;
 
     private Texture2D lineTexture;
+
+    private void OnGUI()
+    {
+        EditorGUI.BeginChangeCheck();
+        DrawTopOptions();
+        if (EditorGUI.EndChangeCheck())
+        {
+            _previousSearchTerm = _searchTerm;
+            UpdateSearchMatches(_searchTerm);
+        }
+
+        _scrollPosition = EditorGUILayout.BeginScrollView(_scrollPosition);
+        DisplayModelHierarchy(_root); // Start from the root node
+        EditorGUILayout.EndScrollView();
+    }
+
+    private void DrawTopOptions()
+    {
+        _searchEnabled = EditorGUILayout.Toggle("Enable Search", _searchEnabled);
+        EditorGUI.BeginDisabledGroup(!_searchEnabled);
+        _searchTerm = EditorGUILayout.TextField("Search", _previousSearchTerm);
+        EditorGUI.EndDisabledGroup();
+    }
+
+    private void UpdateSearchMatches(string searchTerm)
+    {
+        ResetSearchMatches(); // First reset all search matches to false
+        if (string.IsNullOrEmpty(searchTerm))
+        {
+            // If no search term is provided, set everything to match
+            SetSearchMatch(_root, true);
+        }
+        else
+        {
+            string[] queries = searchTerm.Split(new string[] { "||" }, StringSplitOptions.RemoveEmptyEntries);
+            // Perform the search from every leaf upward
+            foreach (DataPeekerModelItem leaf in _endElements)
+            {
+                CheckAndMarkUpwards(leaf, queries);
+            }
+        }
+    }
+
+    private void ResetSearchMatches()
+    {
+        SetSearchMatch(_root, false); // Reset match and expand states starting from the root
+    }
+
+    private bool CheckAndMarkUpwards(DataPeekerModelItem item, string[] queries)
+    {
+        if (item == null) return false;
+
+        // Check current item for a match
+        bool matches = queries.Any(query =>
+            item.Name.IndexOf(query.Trim(), StringComparison.OrdinalIgnoreCase) >= 0 ||
+            (item.Value != null && item.Value.ToString().IndexOf(query.Trim(), StringComparison.OrdinalIgnoreCase) >= 0));
+
+        if (matches)
+        {
+            SetSearchMatch(item, true);
+
+            DataPeekerModelItem current = item;
+            while (current.Parent != null)
+            {
+                current.IsExpanded = true; // Expand all parents
+                current.MatchesSearch = true; // Mark all parents as matching
+                current = current.Parent;
+            }
+        }
+        else
+        {
+            if (item.Parent != null)
+            {
+                matches = CheckAndMarkUpwards(item.Parent, queries);
+            }
+        }
+
+        return matches;
+    }
+
+    private void SetSearchMatch(DataPeekerModelItem item, bool match)
+    {
+        item.MatchesSearch = match;
+        item.IsExpanded = match; // Expand if it matches
+
+        foreach (DataPeekerModelItem child in item.Children)
+        {
+            SetSearchMatch(child, match); // Recursively set all children to match
+        }
+    }
 
     public static void ShowWindow(Type modelType)
     {
@@ -64,50 +152,43 @@ public class DataPeekerModelWindow : EditorWindow
         }
     }
 
-    private void ProcessValue(object value, Type type, int indentLevel, DataPeekerModelItem parent)
+    private void InitializeModelInstance()
     {
-        if (typeof(IList).IsAssignableFrom(type))
+        _root = new DataPeekerModelItem(); // Create the root node
+        _endElements = new List<DataPeekerModelItem>();
+
+        if (DataPeekerModelsListWindow.SharedContext != null)
         {
-            IList list = value as IList;
-            if (list != null)
+            MethodInfo getMethod = DataPeekerModelsListWindow.SharedContext.GetType().GetMethod("Get").MakeGenericMethod(_modelType);
+            _modelInstance = getMethod.Invoke(DataPeekerModelsListWindow.SharedContext, null);
+            _isDefaultInstance = _modelInstance == null;
+        }
+        else
+        {
+            _modelInstance = Activator.CreateInstance(_modelType);
+            _isDefaultInstance = true;
+        }
+
+        _root.Children.AddRange(BuildModelHierarchy(_modelInstance, _modelType, 0, _root));
+        CollectEndElements(_root);
+    }
+
+    private void CollectEndElements(DataPeekerModelItem item)
+    {
+        if (item.Children.Count == 0)
+        {
+            _endElements.Add(item); // This is a leaf node
+        }
+        else
+        {
+            foreach (DataPeekerModelItem child in item.Children)
             {
-                for (int i = 0; i < list.Count; i++)
-                {
-                    // Create a new DataPeekerModelItem for each element in the list
-                    DataPeekerModelItem item = new DataPeekerModelItem($"Item {i}", list[i], list[i]?.GetType() ?? type, indentLevel + 1, parent);
-                    // Recursively build the hierarchy for each element, using the current item as parent
-                    item.Children.AddRange(BuildModelHierarchy(list[i], list[i]?.GetType() ?? type, indentLevel + 2, item));
-                    parent.Children.Add(item);
-                }
+                CollectEndElements(child);
             }
         }
-        else if (typeof(IDictionary).IsAssignableFrom(type))
-        {
-            IDictionary dictionary = value as IDictionary;
-            if (dictionary != null)
-            {
-                foreach (DictionaryEntry entry in dictionary)
-                {
-                    // Create a new DataPeekerModelItem for each entry in the dictionary
-                    DataPeekerModelItem item = new DataPeekerModelItem($"{entry.Key}", entry.Value, entry.Value?.GetType() ?? type, indentLevel + 1, parent);
-                    // Recursively build the hierarchy for the value of each dictionary entry, using the current item as parent
-                    item.Children.AddRange(BuildModelHierarchy(entry.Value, entry.Value?.GetType() ?? type, indentLevel + 2, item));
-                    parent.Children.Add(item);
-                }
-            }
-        }
-        else if (!IsSystemType(type))
-        {
-            // If the type is not a system type, directly build the hierarchy for this object
-            parent.Children.AddRange(BuildModelHierarchy(value, type, indentLevel + 1, parent));
-        }
     }
-    
-    private bool IsSystemType(Type type)
-    {
-        return type.Namespace != null && (type.Namespace.StartsWith("System") || type.Namespace.StartsWith("Microsoft"));
-    }
-    
+
+
     private List<DataPeekerModelItem> BuildModelHierarchy(object obj, Type type, int indentLevel, DataPeekerModelItem parent = null)
     {
         List<DataPeekerModelItem> modelItems = new List<DataPeekerModelItem>();
@@ -163,28 +244,59 @@ public class DataPeekerModelWindow : EditorWindow
         return modelItems;
     }
 
-    private void DisplayModelHierarchy(DataPeekerModelItem root)
+    private void ProcessValue(object value, Type type, int indentLevel, DataPeekerModelItem parent)
     {
-        if (root == null) return;
-
-        foreach (DataPeekerModelItem item in root.Children)
+        if (typeof(IList).IsAssignableFrom(type))
         {
-            if (item.MatchesSearch == true)
+            IList list = value as IList;
+            if (list != null)
             {
-                DisplayModelItem(item);
+                for (int i = 0; i < list.Count; i++)
+                {
+                    // Create a new DataPeekerModelItem for each element in the list
+                    DataPeekerModelItem item = new DataPeekerModelItem($"Item {i}", list[i], list[i]?.GetType() ?? type, indentLevel + 1, parent);
+                    // Recursively build the hierarchy for each element, using the current item as parent
+                    item.Children.AddRange(BuildModelHierarchy(list[i], list[i]?.GetType() ?? type, indentLevel + 2, item));
+                    parent.Children.Add(item);
+                }
             }
         }
+        else if (typeof(IDictionary).IsAssignableFrom(type))
+        {
+            IDictionary dictionary = value as IDictionary;
+            if (dictionary != null)
+            {
+                foreach (DictionaryEntry entry in dictionary)
+                {
+                    // Create a new DataPeekerModelItem for each entry in the dictionary
+                    DataPeekerModelItem item = new DataPeekerModelItem($"{entry.Key}", entry.Value, entry.Value?.GetType() ?? type, indentLevel + 1, parent);
+                    // Recursively build the hierarchy for the value of each dictionary entry, using the current item as parent
+                    item.Children.AddRange(BuildModelHierarchy(entry.Value, entry.Value?.GetType() ?? type, indentLevel + 2, item));
+                    parent.Children.Add(item);
+                }
+            }
+        }
+        else if (!IsSystemType(type))
+        {
+            // If the type is not a system type, directly build the hierarchy for this object
+            parent.Children.AddRange(BuildModelHierarchy(value, type, indentLevel + 1, parent));
+        }
+    }
+
+    private bool IsSystemType(Type type)
+    {
+        return type.Namespace != null && (type.Namespace.StartsWith("System") || type.Namespace.StartsWith("Microsoft"));
     }
 
     private void DisplayModelItem(DataPeekerModelItem item)
     {
         EditorGUI.indentLevel = item.IndentLevel;
         float labelHeight = EditorGUIUtility.singleLineHeight;
-        
+
         // Calculate available space for the label
         float labelWidth = 300;
         EditorGUIUtility.labelWidth = labelWidth;
-        
+
         Rect rect = EditorGUILayout.BeginVertical("box");
         GUILayout.Space(1f);
 
@@ -193,17 +305,17 @@ public class DataPeekerModelWindow : EditorWindow
         {
             CreateBackingFieldLabel(item);
         }
-        
+
         Color originalColor = GUI.backgroundColor;
         GUI.backgroundColor = _useColor1 ? _color1 : _color2;
         _useColor1 = !_useColor1;
         EditorGUILayout.BeginVertical();
         GUI.backgroundColor = originalColor;
-        
+
         if (item.Value == null || _simpleTypes.Contains(item.Type))
         {
             string displayValue = item.Value == null ? "null" : item.Value.ToString();
-            EditorGUILayout.LabelField(CreateIndentedLabel(item.IndentLevel, item.Name), displayValue, GUILayout.Height(labelHeight)); 
+            EditorGUILayout.LabelField(CreateIndentedLabel(item.IndentLevel, item.Name), displayValue, GUILayout.Height(labelHeight));
             DrawHierarchyLines(item.IndentLevel, rect);
             EditorGUILayout.EndVertical();
             EditorGUILayout.EndVertical();
@@ -211,31 +323,31 @@ public class DataPeekerModelWindow : EditorWindow
         }
 
         // Handle different types with specific UI controls
-        if (item.Type == typeof(int))
+        if (item.Type == typeof(int) || item.Type == typeof(int?))
         {
             item.Value = EditorGUILayout.IntField(CreateIndentedLabel(item.IndentLevel, item.Name), (int)item.Value, GUILayout.Height(labelHeight));
         }
-        else if (item.Type == typeof(float))
+        else if (item.Type == typeof(float) || item.Type == typeof(float?))
         {
             item.Value = EditorGUILayout.FloatField(CreateIndentedLabel(item.IndentLevel, item.Name), (float)item.Value, GUILayout.Height(labelHeight));
         }
-        else if (item.Type == typeof(string))
+        else if (item.Type == typeof(string) || item.Type == typeof(string))
         {
             item.Value = EditorGUILayout.TextField(CreateIndentedLabel(item.IndentLevel, item.Name), (string)item.Value, GUILayout.Height(labelHeight));
         }
-        else if (item.Type == typeof(bool))
+        else if (item.Type == typeof(bool) || item.Type == typeof(bool?))
         {
             item.Value = EditorGUILayout.Toggle(CreateIndentedLabel(item.IndentLevel, item.Name), (bool)item.Value, GUILayout.Height(labelHeight));
         }
-        else if (item.Type == typeof(Vector2))
+        else if (item.Type == typeof(Vector2) || item.Type == typeof(Vector2?))
         {
             item.Value = EditorGUILayout.Vector2Field(CreateIndentedLabel(item.IndentLevel, item.Name), (Vector2)item.Value, GUILayout.Height(labelHeight));
         }
-        else if (item.Type == typeof(Vector3))
+        else if (item.Type == typeof(Vector3) || item.Type == typeof(Vector3?))
         {
             item.Value = EditorGUILayout.Vector3Field(CreateIndentedLabel(item.IndentLevel, item.Name), (Vector3)item.Value, GUILayout.Height(labelHeight));
         }
-        else if (item.Type == typeof(Vector4))
+        else if (item.Type == typeof(Vector4) || item.Type == typeof(Vector4?))
         {
             item.Value = EditorGUILayout.Vector4Field(CreateIndentedLabel(item.IndentLevel, item.Name), (Vector4)item.Value, GUILayout.Height(labelHeight));
         }
@@ -259,55 +371,32 @@ public class DataPeekerModelWindow : EditorWindow
             GUILayout.Label(CreateIndentedLabel(item.IndentLevel, item.Name) + ": " + item.Value.ToString(), GUILayout.Height(labelHeight));
             GUILayout.Space(labelHeight);
         }
-        
+
         DrawHierarchyLines(item.IndentLevel, rect);
 
         EditorGUILayout.EndVertical();
         EditorGUILayout.EndVertical();
     }
-   
-   private void CreateBackingFieldLabel(DataPeekerModelItem item)
+
+    private void CreateBackingFieldLabel(DataPeekerModelItem item)
     {
         string itemName = item.Name[..1].ToLower() + item.Name[1..];
-        
+
         Color defaultColor = GUI.color;
         GUI.color = _backingFieldColor;
         EditorGUILayout.LabelField(CreateIndentedLabel(item.IndentLevel, $"_{itemName}"), GUILayout.Height(EditorGUIUtility.singleLineHeight));
         GUI.color = defaultColor;
     }
-   
-    private void InitializeModelInstance()
+
+    private void DisplayModelHierarchy(DataPeekerModelItem root)
     {
-        _root = new DataPeekerModelItem(); // Create the root node
-        _endElements = new List<DataPeekerModelItem>();
+        if (root == null) return;
 
-        if (DataPeekerModelsListWindow.SharedContext != null)
+        foreach (DataPeekerModelItem item in root.Children)
         {
-            MethodInfo getMethod = DataPeekerModelsListWindow.SharedContext.GetType().GetMethod("Get").MakeGenericMethod(_modelType);
-            _modelInstance = getMethod.Invoke(DataPeekerModelsListWindow.SharedContext, null);
-            _isDefaultInstance = _modelInstance == null;
-        }
-        else
-        {
-            _modelInstance = Activator.CreateInstance(_modelType);
-            _isDefaultInstance = true;
-        }
-
-        _root.Children.AddRange(BuildModelHierarchy(_modelInstance, _modelType, 0, _root));
-        CollectEndElements(_root);
-    }
-
-    private void CollectEndElements(DataPeekerModelItem item)
-    {
-        if (item.Children.Count == 0)
-        {
-            _endElements.Add(item); // This is a leaf node
-        }
-        else
-        {
-            foreach (DataPeekerModelItem child in item.Children)
+            if (item.MatchesSearch == true)
             {
-                CollectEndElements(child);
+                DisplayModelItem(item);
             }
         }
     }
@@ -326,9 +415,10 @@ public class DataPeekerModelWindow : EditorWindow
         {
             CacheTypeProperties(type);
         }
+
         return typeCache[type];
     }
-    
+
     private void OnEnable()
     {
         EditorApplication.update += OnEditorUpdate;
@@ -337,7 +427,7 @@ public class DataPeekerModelWindow : EditorWindow
             InitializeLineTexture();
         }
     }
-    
+
     private void OnEditorUpdate()
     {
         if (_isDefaultInstance && DataPeekerModelsListWindow.SharedContext != null)
@@ -348,103 +438,14 @@ public class DataPeekerModelWindow : EditorWindow
             if (contextModelInstance != null)
             {
                 _modelInstance = contextModelInstance;
-                _modelItems = BuildModelHierarchy(_modelInstance, _modelType, 0);
+                BuildModelHierarchy(_modelInstance, _modelType, 0);
                 _isDefaultInstance = false;
             }
         }
 
         Repaint();
     }
-    
-    private void OnGUI()
-    {
-        EditorGUI.BeginChangeCheck();
-        DrawTopOptions();
-        if (EditorGUI.EndChangeCheck())
-        {
-            _previousSearchTerm = _searchTerm;
-            UpdateSearchMatches(_searchTerm);
-        }
 
-        _scrollPosition = EditorGUILayout.BeginScrollView(_scrollPosition);
-        DisplayModelHierarchy(_root);  // Start from the root node
-        EditorGUILayout.EndScrollView();
-    }
-    
-    private void DrawTopOptions()
-    {
-        _searchEnabled = EditorGUILayout.Toggle("Enable Search", _searchEnabled);
-        EditorGUI.BeginDisabledGroup(!_searchEnabled);
-        _searchTerm = EditorGUILayout.TextField("Search", _previousSearchTerm);
-        EditorGUI.EndDisabledGroup();
-    }
-    
-    private void UpdateSearchMatches(string searchTerm)
-    {
-        ResetSearchMatches();  // First reset all search matches to false
-        if (string.IsNullOrEmpty(searchTerm))
-        {
-            // If no search term is provided, set everything to match
-            SetSearchMatch(_root, true);
-        }
-        else
-        {
-            string[] queries = searchTerm.Split(new string[] { "||" }, StringSplitOptions.RemoveEmptyEntries);
-            // Perform the search from every leaf upward
-            foreach (DataPeekerModelItem leaf in _endElements)
-            {
-                CheckAndMarkUpwards(leaf, queries);
-            }
-        }
-    }
-
-    private bool CheckAndMarkUpwards(DataPeekerModelItem item, string[] queries)
-    {
-        if (item == null) return false;
-
-        // Check current item for a match
-        bool matches = queries.Any(query =>
-            item.Name.IndexOf(query.Trim(), StringComparison.OrdinalIgnoreCase) >= 0 ||
-            (item.Value != null && item.Value.ToString().IndexOf(query.Trim(), StringComparison.OrdinalIgnoreCase) >= 0));
-        
-        if (matches)
-        {
-            SetSearchMatch(item, true);
-                
-            DataPeekerModelItem current = item;
-            while (current.Parent != null)
-            {
-                current.IsExpanded = true;  // Expand all parents
-                current.MatchesSearch = true;  // Mark all parents as matching
-                current = current.Parent;
-            }
-        }
-        else
-        {
-            if (item.Parent != null)
-            {
-                matches = CheckAndMarkUpwards(item.Parent, queries);
-            }
-        }
-        return matches;
-    }
-
-    private void SetSearchMatch(DataPeekerModelItem item, bool match)
-    {
-        item.MatchesSearch = match;
-        item.IsExpanded = match;  // Expand if it matches
-
-        foreach (DataPeekerModelItem child in item.Children)
-        {
-            SetSearchMatch(child, match);  // Recursively set all children to match
-        }
-    }
-
-    private void ResetSearchMatches()
-    {
-        SetSearchMatch(_root, false);  // Reset match and expand states starting from the root
-    }
-    
     private void DisplayListField(DataPeekerModelItem item)
     {
         object itemValue = item.Value;
@@ -471,7 +472,7 @@ public class DataPeekerModelWindow : EditorWindow
         IDictionary dictionary = itemValue as IDictionary;
         if (dictionary == null)
             return;
-        
+
         item.IsExpanded = EditorGUILayout.Foldout(item.IsExpanded, CreateIndentedLabel(item.IndentLevel, $"{item.Name} (Dictionary) [{dictionary.Count}]"), true);
 
         if (item.IsExpanded == true)
@@ -482,7 +483,7 @@ public class DataPeekerModelWindow : EditorWindow
             }
         }
     }
-    
+
     private void InitializeLineTexture()
     {
         lineTexture = new Texture2D(1, 1);
@@ -502,7 +503,7 @@ public class DataPeekerModelWindow : EditorWindow
 
     private void OnDestroy()
     {
-        openWindows.Remove(_modelType);
+        openWindows?.Remove(_modelType);
         if (lineTexture != null)
         {
             DestroyImmediate(lineTexture);
