@@ -236,9 +236,18 @@ public class DataPeekerModelWindow : EditorWindow
                 continue;
 
             PropertyInfo capturedProperty = property;
-            DataPeekerModelItem dataPeekerModelItem = new DataPeekerModelItem(capturedProperty.Name, capturedProperty.GetValue(obj), capturedProperty.PropertyType, indentLevel, parent, isBackingField: isBackingField);
-            dataPeekerModelItem.SetBinding(() => capturedProperty.GetValue(obj), newValue => capturedProperty.SetValue(obj, newValue));
-            ProcessValue(capturedProperty.GetValue(obj), capturedProperty.PropertyType, indentLevel, dataPeekerModelItem);
+            object propertyValue = null;
+            try
+            {
+                propertyValue = capturedProperty.GetValue(obj);
+            }
+            catch(Exception ex)
+            {
+                propertyValue = null;
+            }
+            DataPeekerModelItem dataPeekerModelItem = new DataPeekerModelItem(capturedProperty.Name, propertyValue, capturedProperty.PropertyType, indentLevel, parent, isBackingField: isBackingField);
+            dataPeekerModelItem.SetBinding(() => propertyValue, capturedProperty.CanWrite == true ? newValue => capturedProperty.SetValue(obj, newValue) : null);
+            ProcessValue(propertyValue, capturedProperty.PropertyType, indentLevel, dataPeekerModelItem);
 
             modelItems.Add(dataPeekerModelItem);
         }
@@ -250,9 +259,19 @@ public class DataPeekerModelWindow : EditorWindow
                 continue;
 
             FieldInfo capturedField = field;
-            DataPeekerModelItem dataPeekerModelItem = new DataPeekerModelItem(capturedField.Name, capturedField.GetValue(obj), capturedField.FieldType, indentLevel, parent);
-            dataPeekerModelItem.SetBinding(() => capturedField.GetValue(obj), newValue => capturedField.SetValue(obj, newValue));
-            ProcessValue(capturedField.GetValue(obj), capturedField.FieldType, indentLevel, dataPeekerModelItem);
+            object fieldValue = null;
+            try
+            {
+                fieldValue = capturedField.GetValue(obj);
+            }
+            catch(Exception ex)
+            {
+                fieldValue = null;
+            }
+            
+            DataPeekerModelItem dataPeekerModelItem = new DataPeekerModelItem(capturedField.Name, fieldValue, capturedField.FieldType, indentLevel, parent);
+            dataPeekerModelItem.SetBinding(() => fieldValue, newValue => capturedField.SetValue(obj, newValue));
+            ProcessValue(fieldValue, capturedField.FieldType, indentLevel, dataPeekerModelItem);
 
             modelItems.Add(dataPeekerModelItem);
         }

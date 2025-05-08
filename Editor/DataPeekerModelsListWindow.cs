@@ -83,7 +83,7 @@ public class DataPeekerModelsListWindow : EditorWindow
                 if (typeof(ManagerBehaviourBase).IsAssignableFrom(type) && !type.IsInterface && !type.IsAbstract)
                 {
                     ManagerBehaviourBase manager = FindFirstObjectByType(type) as ManagerBehaviourBase;
-                    if (manager != null)
+                    if (manager != null && manager.Context != null)
                     {
                         SharedContext = manager.Context.CommonApplication.GetContext<GameModelContext>();
                         return;
