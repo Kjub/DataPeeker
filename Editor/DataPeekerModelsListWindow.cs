@@ -2,11 +2,11 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using Editor.Editor;
 using UnityEditor;
 using UnityEngine;
 using Game.Model;
 using Game.Presentation.Managers.Behaviours;
-using UnityEditor.Localization.Plugins.XLIFF.V12;
 
 public class DataPeekerModelsListWindow : EditorWindow
 {
@@ -82,8 +82,8 @@ public class DataPeekerModelsListWindow : EditorWindow
             {
                 if (typeof(ManagerBehaviourBase).IsAssignableFrom(type) && !type.IsInterface && !type.IsAbstract)
                 {
-                    ManagerBehaviourBase manager = FindObjectOfType(type) as ManagerBehaviourBase;
-                    if (manager != null)
+                    ManagerBehaviourBase manager = FindFirstObjectByType(type) as ManagerBehaviourBase;
+                    if (manager != null && manager.Context != null)
                     {
                         SharedContext = manager.Context.CommonApplication.GetContext<GameModelContext>();
                         return;
@@ -108,8 +108,14 @@ public class DataPeekerModelsListWindow : EditorWindow
                 }
             }
         }
+        
+        modelTypes.Sort((type1, type2) => string.Compare(type1.Name, type2.Name, StringComparison.Ordinal));
+        
+        if (Application.isPlaying == false)
+        {
+            modelTypes.Insert(0, typeof(DataPeekerTestModel));
+        }
 
-        modelTypes.Sort((type1, type2) => type1.Name.CompareTo(type2.Name));
         UpdateFilteredModelTypes();
     }
 

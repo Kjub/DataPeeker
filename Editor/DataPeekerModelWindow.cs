@@ -3,9 +3,13 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using AtClient.Helpers.Functionality.Extensions;
+using Editor.Editor;
 using Game.Model;
+using Game.Model.Job;
 using Game.Model.ValueObjects;
 using Game.Presentation;
+using Newtonsoft.Json;
 using UnityEditor;
 using UnityEngine;
 using Material = UnityEngine.Material;
@@ -31,7 +35,7 @@ public class DataPeekerModelWindow : EditorWindow
 
     private string _searchTerm = "";
     private string _previousSearchTerm = "";
-    private bool _searchEnabled = true;
+    private bool _isSearchActive = false;
 
     private DataPeekerModelItem _root;
     private List<DataPeekerModelItem> _endElements;
@@ -55,10 +59,7 @@ public class DataPeekerModelWindow : EditorWindow
 
     private void DrawTopOptions()
     {
-        _searchEnabled = EditorGUILayout.Toggle("Enable Search", _searchEnabled);
-        EditorGUI.BeginDisabledGroup(!_searchEnabled);
         _searchTerm = EditorGUILayout.TextField("Search", _previousSearchTerm);
-        EditorGUI.EndDisabledGroup();
     }
 
     private void UpdateSearchMatches(string searchTerm)
@@ -67,10 +68,12 @@ public class DataPeekerModelWindow : EditorWindow
         if (string.IsNullOrEmpty(searchTerm))
         {
             // If no search term is provided, set everything to match
+            _isSearchActive = false;
             SetSearchMatch(_root, true);
         }
         else
         {
+            _isSearchActive = true;
             string[] queries = searchTerm.Split(new string[] { "||" }, StringSplitOptions.RemoveEmptyEntries);
             // Perform the search from every leaf upward
             foreach (DataPeekerModelItem leaf in _endElements)
@@ -101,7 +104,7 @@ public class DataPeekerModelWindow : EditorWindow
             DataPeekerModelItem current = item;
             while (current.Parent != null)
             {
-                current.IsExpanded = true; // Expand all parents
+                current.IsExpandedBySearch = true; // Expand all parents
                 current.MatchesSearch = true; // Mark all parents as matching
                 current = current.Parent;
             }
@@ -120,7 +123,7 @@ public class DataPeekerModelWindow : EditorWindow
     private void SetSearchMatch(DataPeekerModelItem item, bool match)
     {
         item.MatchesSearch = match;
-        item.IsExpanded = match; // Expand if it matches
+        item.IsExpandedBySearch = match; // Expand if it matches
 
         foreach (DataPeekerModelItem child in item.Children)
         {
@@ -156,19 +159,27 @@ public class DataPeekerModelWindow : EditorWindow
     {
         _root = new DataPeekerModelItem(); // Create the root node
         _endElements = new List<DataPeekerModelItem>();
-
-        if (DataPeekerModelsListWindow.SharedContext != null)
-        {
-            MethodInfo getMethod = DataPeekerModelsListWindow.SharedContext.GetType().GetMethod("Get").MakeGenericMethod(_modelType);
-            _modelInstance = getMethod.Invoke(DataPeekerModelsListWindow.SharedContext, null);
-            _isDefaultInstance = _modelInstance == null;
-        }
-        else
+        
+        if (Application.isPlaying == false)
         {
             _modelInstance = Activator.CreateInstance(_modelType);
             _isDefaultInstance = true;
         }
-
+        else
+        {
+            if (DataPeekerModelsListWindow.SharedContext != null)
+            {
+                MethodInfo getMethod = DataPeekerModelsListWindow.SharedContext.GetType().GetMethod("Get").MakeGenericMethod(_modelType);
+                _modelInstance = getMethod.Invoke(DataPeekerModelsListWindow.SharedContext, null);
+                _isDefaultInstance = _modelInstance == null;
+            }
+            else
+            {
+                _modelInstance = Activator.CreateInstance(_modelType);
+                _isDefaultInstance = true;
+            }
+        }
+        
         _root.Children.AddRange(BuildModelHierarchy(_modelInstance, _modelType, 0, _root));
         CollectEndElements(_root);
     }
@@ -192,9 +203,10 @@ public class DataPeekerModelWindow : EditorWindow
     private List<DataPeekerModelItem> BuildModelHierarchy(object obj, Type type, int indentLevel, DataPeekerModelItem parent = null)
     {
         List<DataPeekerModelItem> modelItems = new List<DataPeekerModelItem>();
+        
         if (obj == null || _visitedObjects.Contains(obj))
             return modelItems;
-
+        
         _visitedObjects.Add(obj);
 
         (FieldInfo[] fields, PropertyInfo[] properties) = GetTypeProperties(type);
@@ -219,10 +231,23 @@ public class DataPeekerModelWindow : EditorWindow
 
             string backingFieldName = $"<{property.Name}>k__BackingField";
             bool isBackingField = backingFields.ContainsKey(backingFieldName);
+            
+            if (!property.CanWrite && isBackingField)
+                continue;
 
-            object value = property.GetValue(obj);
-            DataPeekerModelItem dataPeekerModelItem = new DataPeekerModelItem(property.Name, value, property.PropertyType, indentLevel, parent, isBackingField: isBackingField);
-            ProcessValue(value, property.PropertyType, indentLevel, dataPeekerModelItem);
+            PropertyInfo capturedProperty = property;
+            object propertyValue = null;
+            try
+            {
+                propertyValue = capturedProperty.GetValue(obj);
+            }
+            catch(Exception ex)
+            {
+                propertyValue = null;
+            }
+            DataPeekerModelItem dataPeekerModelItem = new DataPeekerModelItem(capturedProperty.Name, propertyValue, capturedProperty.PropertyType, indentLevel, parent, isBackingField: isBackingField);
+            dataPeekerModelItem.SetBinding(() => propertyValue, capturedProperty.CanWrite == true ? newValue => capturedProperty.SetValue(obj, newValue) : null);
+            ProcessValue(propertyValue, capturedProperty.PropertyType, indentLevel, dataPeekerModelItem);
 
             modelItems.Add(dataPeekerModelItem);
         }
@@ -233,9 +258,20 @@ public class DataPeekerModelWindow : EditorWindow
             if (backingFields.ContainsKey(field.Name) || _ignoredTypes.Contains(field.FieldType))
                 continue;
 
-            object value = field.GetValue(obj);
-            DataPeekerModelItem dataPeekerModelItem = new DataPeekerModelItem(field.Name, value, field.FieldType, indentLevel, parent);
-            ProcessValue(value, field.FieldType, indentLevel, dataPeekerModelItem);
+            FieldInfo capturedField = field;
+            object fieldValue = null;
+            try
+            {
+                fieldValue = capturedField.GetValue(obj);
+            }
+            catch(Exception ex)
+            {
+                fieldValue = null;
+            }
+            
+            DataPeekerModelItem dataPeekerModelItem = new DataPeekerModelItem(capturedField.Name, fieldValue, capturedField.FieldType, indentLevel, parent);
+            dataPeekerModelItem.SetBinding(() => fieldValue, newValue => capturedField.SetValue(obj, newValue));
+            ProcessValue(fieldValue, capturedField.FieldType, indentLevel, dataPeekerModelItem);
 
             modelItems.Add(dataPeekerModelItem);
         }
@@ -322,34 +358,58 @@ public class DataPeekerModelWindow : EditorWindow
             return;
         }
 
+        DrawItemField(item, labelHeight);
+        DrawHierarchyLines(item.IndentLevel, rect);
+
+        EditorGUILayout.EndVertical();
+        EditorGUILayout.EndVertical();
+    }
+
+    private void DrawItemField(DataPeekerModelItem item, float labelHeight)
+    {
         // Handle different types with specific UI controls
+        GUILayoutOption[] guiLayoutOption =  {GUILayout.Height(labelHeight), GUILayout.MinWidth(150)};
+
+        string indentedLabel = CreateIndentedLabel(item.IndentLevel, item.Name);
         if (item.Type == typeof(int) || item.Type == typeof(int?))
         {
-            item.Value = EditorGUILayout.IntField(CreateIndentedLabel(item.IndentLevel, item.Name), (int)item.Value, GUILayout.Height(labelHeight));
+            EditorGUILayout.BeginHorizontal();
+            EditorGUILayout.LabelField(indentedLabel, GUILayout.Height(labelHeight));
+            item.SetBoundValue(EditorGUILayout.IntField((int)item.Value, guiLayoutOption));
+            EditorGUILayout.EndHorizontal();
         }
         else if (item.Type == typeof(float) || item.Type == typeof(float?))
         {
-            item.Value = EditorGUILayout.FloatField(CreateIndentedLabel(item.IndentLevel, item.Name), (float)item.Value, GUILayout.Height(labelHeight));
+            item.SetBoundValue(EditorGUILayout.FloatField(indentedLabel, (float)item.Value, guiLayoutOption));
         }
         else if (item.Type == typeof(string) || item.Type == typeof(string))
         {
-            item.Value = EditorGUILayout.TextField(CreateIndentedLabel(item.IndentLevel, item.Name), (string)item.Value, GUILayout.Height(labelHeight));
+            item.SetBoundValue(EditorGUILayout.TextField(indentedLabel, (string)item.Value, guiLayoutOption));
         }
         else if (item.Type == typeof(bool) || item.Type == typeof(bool?))
         {
-            item.Value = EditorGUILayout.Toggle(CreateIndentedLabel(item.IndentLevel, item.Name), (bool)item.Value, GUILayout.Height(labelHeight));
+            item.SetBoundValue(EditorGUILayout.Toggle(indentedLabel, (bool)item.Value, guiLayoutOption));
         }
         else if (item.Type == typeof(Vector2) || item.Type == typeof(Vector2?))
         {
-            item.Value = EditorGUILayout.Vector2Field(CreateIndentedLabel(item.IndentLevel, item.Name), (Vector2)item.Value, GUILayout.Height(labelHeight));
+            EditorGUILayout.BeginHorizontal();
+            EditorGUILayout.LabelField(indentedLabel, GUILayout.Height(labelHeight));
+            item.SetBoundValue(EditorGUILayout.Vector2Field(GUIContent.none, (Vector2)item.Value, guiLayoutOption));
+            EditorGUILayout.EndHorizontal();
         }
         else if (item.Type == typeof(Vector3) || item.Type == typeof(Vector3?))
         {
-            item.Value = EditorGUILayout.Vector3Field(CreateIndentedLabel(item.IndentLevel, item.Name), (Vector3)item.Value, GUILayout.Height(labelHeight));
+            EditorGUILayout.BeginHorizontal();
+            EditorGUILayout.LabelField(indentedLabel, GUILayout.Height(labelHeight));
+            item.SetBoundValue(EditorGUILayout.Vector3Field(GUIContent.none,(Vector3)item.Value, guiLayoutOption));
+            EditorGUILayout.EndHorizontal();
         }
         else if (item.Type == typeof(Vector4) || item.Type == typeof(Vector4?))
         {
-            item.Value = EditorGUILayout.Vector4Field(CreateIndentedLabel(item.IndentLevel, item.Name), (Vector4)item.Value, GUILayout.Height(labelHeight));
+            EditorGUILayout.BeginHorizontal();
+            EditorGUILayout.LabelField(indentedLabel, GUILayout.Height(labelHeight));
+            item.SetBoundValue(EditorGUILayout.Vector4Field(GUIContent.none,(Vector4)item.Value, guiLayoutOption));
+            EditorGUILayout.EndHorizontal();
         }
         else if (typeof(IList).IsAssignableFrom(item.Type))
         {
@@ -361,21 +421,18 @@ public class DataPeekerModelWindow : EditorWindow
         }
         else if (item.Type.IsClass || (item.Type.IsValueType && !item.Type.IsPrimitive && !item.Type.IsEnum))
         {
-            if (item.IsExpanded = EditorGUILayout.Foldout(item.IsExpanded, CreateIndentedLabel(item.IndentLevel, $"{item.Name} ({item.Type.Name})"), true))
+            if (IsItemExpanded(item, $"{item.Name} ({item.Type.Name}) | {item.IsExpanded} | {item.IsExpandedBySearch}"))
             {
                 DisplayModelHierarchy(item);
             }
         }
         else
         {
-            GUILayout.Label(CreateIndentedLabel(item.IndentLevel, item.Name) + ": " + item.Value.ToString(), GUILayout.Height(labelHeight));
+            GUILayout.Label(indentedLabel + ": " + item.Value, guiLayoutOption);
             GUILayout.Space(labelHeight);
         }
+        
 
-        DrawHierarchyLines(item.IndentLevel, rect);
-
-        EditorGUILayout.EndVertical();
-        EditorGUILayout.EndVertical();
     }
 
     private void CreateBackingFieldLabel(DataPeekerModelItem item)
@@ -394,7 +451,7 @@ public class DataPeekerModelWindow : EditorWindow
 
         foreach (DataPeekerModelItem item in root.Children)
         {
-            if (item.MatchesSearch == true)
+            if (_isSearchActive == false || (item.MatchesSearch == true && _isSearchActive == true))
             {
                 DisplayModelItem(item);
             }
@@ -452,16 +509,17 @@ public class DataPeekerModelWindow : EditorWindow
         IList list = itemValue as IList;
         if (list == null)
             return;
-        item.IsExpanded = EditorGUILayout.Foldout(item.IsExpanded, CreateIndentedLabel(item.IndentLevel, $"{item.Name} (List) [{list.Count}]"), true);
-
-        if (item.IsExpanded == true)
+        
+        if (IsItemExpanded(item, $"{item.Name} (List) [{list.Count}]") == false)
         {
-            foreach (DataPeekerModelItem child in item.Children)
+            return;
+        }
+        
+        foreach (DataPeekerModelItem child in item.Children)
+        {
+            if (child.MatchesSearch == true)
             {
-                if (child.MatchesSearch == true)
-                {
-                    DisplayModelItem(child);
-                }
+                DisplayModelItem(child);
             }
         }
     }
@@ -473,15 +531,28 @@ public class DataPeekerModelWindow : EditorWindow
         if (dictionary == null)
             return;
 
-        item.IsExpanded = EditorGUILayout.Foldout(item.IsExpanded, CreateIndentedLabel(item.IndentLevel, $"{item.Name} (Dictionary) [{dictionary.Count}]"), true);
-
-        if (item.IsExpanded == true)
+        if (IsItemExpanded(item, $"{item.Name} (Dictionary) [{dictionary.Count}]") == true)
         {
             foreach (DataPeekerModelItem child in item.Children)
             {
                 DisplayModelItem(child);
             }
         }
+    }
+    
+    private bool IsItemExpanded(DataPeekerModelItem item, string label)
+    {
+        if (item == null)
+            return false;
+        
+        if (_isSearchActive == true)
+        {
+            item.IsExpandedBySearch = EditorGUILayout.Foldout(item.IsExpandedBySearch, CreateIndentedLabel(item.IndentLevel, label), true);
+            return item.IsExpandedBySearch;
+        }
+        
+        item.IsExpanded = EditorGUILayout.Foldout(item.IsExpanded, CreateIndentedLabel(item.IndentLevel, label), true);
+        return item.IsExpanded;
     }
 
     private void InitializeLineTexture()

@@ -1,5 +1,13 @@
 # Changelog
 
+### [0.2.0] - 2025-05-15
+
+#### Added
+- Setters for writeable variables
+
+#### Changed
+- Search overhaul so it isn't all expanded after searching
+
 ### [0.1.2] - 2024-10-22
 #### Fixed
 - Model window now shows nullable types correctly
