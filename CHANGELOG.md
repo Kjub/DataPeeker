@@ -1,5 +1,11 @@
 # Changelog
 
+### [0.3.0] - 2025-06-23
+
+#### Added
+ - Selection of element which stays after clearing search
+ - Focus on search bar after opening window
+
 ### [0.2.0] - 2025-05-15
 
 #### Added

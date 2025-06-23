@@ -18,10 +18,17 @@ public class DataPeekerModelsListWindow : EditorWindow
         GetWindow<DataPeekerModelsListWindow>("Data Peeker");
     }
 
-    private List<Type> modelTypes = new List<Type>();
-    private List<Type> filteredModelTypes;
-    private string searchTerm = "";
-    private Vector2 scrollPosition;
+    private List<Type> _modelTypes = new List<Type>();
+    private List<Type> _filteredModelTypes;
+    private string _searchTerm = "";
+    private Vector2 _scrollPosition;
+    private bool _focusSearchNextFrame = true;
+    
+    [RuntimeInitializeOnLoadMethod]
+    private static void InitDataPeekerModelList()
+    {
+        SharedContext = null;
+    }
 
     private void OnEnable()
     {
@@ -30,47 +37,66 @@ public class DataPeekerModelsListWindow : EditorWindow
         EditorApplication.playModeStateChanged += OnPlayModeStateChanged;
     }
 
-    private void OnDisable()
+    private void OnDestroy()
     {
         EditorApplication.playModeStateChanged -= OnPlayModeStateChanged;
     }
 
+    private bool focusSearchNextFrame = true;
+
     private void OnGUI()
     {
-        GUILayout.BeginHorizontal(GUI.skin.FindStyle("Toolbar"));
-        string newSearchTerm = GUILayout.TextField(searchTerm, GUI.skin.FindStyle("ToolbarSearchTextField"));
-        if (GUILayout.Button("", GUI.skin.FindStyle("ToolbarSearchCancelButton")))
+        DrawSearchBar();
+
+        if (focusSearchNextFrame)
         {
-            newSearchTerm = "";
-            GUI.FocusControl(null);
+            EditorGUI.FocusTextInControl("SearchField");
+            focusSearchNextFrame = false;
+        }
+    }
+
+    private void DrawSearchBar()
+    {
+        GUILayout.BeginHorizontal(EditorStyles.toolbar);
+
+        GUI.SetNextControlName("SearchField");
+        string newSearchTerm = GUILayout.TextField(_searchTerm, GUI.skin.FindStyle("ToolbarSearchTextField"));
+
+        if (!string.IsNullOrEmpty(newSearchTerm))
+        {
+            if (GUILayout.Button("", GUI.skin.FindStyle("ToolbarSearchCancelButton")))
+            {
+                newSearchTerm = "";
+                GUI.FocusControl(null);
+            }
         }
 
         GUILayout.EndHorizontal();
-        GUILayout.Space(15f);
+        GUILayout.Space(10f);
 
-        if (newSearchTerm != searchTerm)
+        if (newSearchTerm != _searchTerm)
         {
-            searchTerm = newSearchTerm;
+            _searchTerm = newSearchTerm;
             UpdateFilteredModelTypes();
         }
 
-        if (filteredModelTypes.Count == 0)
+        if (_filteredModelTypes.Count == 0)
         {
             EditorGUILayout.LabelField("No matching models found.");
             return;
         }
 
-        scrollPosition = EditorGUILayout.BeginScrollView(scrollPosition);
-        foreach (Type modelType in filteredModelTypes)
+        _scrollPosition = EditorGUILayout.BeginScrollView(_scrollPosition);
+        foreach (Type modelType in _filteredModelTypes)
         {
             if (GUILayout.Button(modelType.Name))
             {
                 DataPeekerModelWindow.ShowWindow(modelType);
             }
         }
-
         EditorGUILayout.EndScrollView();
     }
+
 
     private void FindManagerBehaviourBase()
     {
@@ -82,7 +108,7 @@ public class DataPeekerModelsListWindow : EditorWindow
             {
                 if (typeof(ManagerBehaviourBase).IsAssignableFrom(type) && !type.IsInterface && !type.IsAbstract)
                 {
-                    ManagerBehaviourBase manager = FindFirstObjectByType(type) as ManagerBehaviourBase;
+                    ManagerBehaviourBase manager = FindAnyObjectByType(type) as ManagerBehaviourBase;
                     if (manager != null && manager.Context != null)
                     {
                         SharedContext = manager.Context.CommonApplication.GetContext<GameModelContext>();
@@ -95,7 +121,7 @@ public class DataPeekerModelsListWindow : EditorWindow
 
     private void FindModelTypes()
     {
-        modelTypes.Clear();
+        _modelTypes.Clear();
         Assembly[] assemblies = AppDomain.CurrentDomain.GetAssemblies();
         foreach (Assembly assembly in assemblies)
         {
@@ -104,16 +130,16 @@ public class DataPeekerModelsListWindow : EditorWindow
             {
                 if (typeof(IReadOnlyModel).IsAssignableFrom(type) && !type.IsInterface && !type.IsAbstract)
                 {
-                    modelTypes.Add(type);
+                    _modelTypes.Add(type);
                 }
             }
         }
         
-        modelTypes.Sort((type1, type2) => string.Compare(type1.Name, type2.Name, StringComparison.Ordinal));
+        _modelTypes.Sort((type1, type2) => string.Compare(type1.Name, type2.Name, StringComparison.Ordinal));
         
         if (Application.isPlaying == false)
         {
-            modelTypes.Insert(0, typeof(DataPeekerTestModel));
+            _modelTypes.Insert(0, typeof(DataPeekerTestModel));
         }
 
         UpdateFilteredModelTypes();
@@ -121,14 +147,14 @@ public class DataPeekerModelsListWindow : EditorWindow
 
     private void UpdateFilteredModelTypes()
     {
-        if (string.IsNullOrEmpty(searchTerm))
+        if (string.IsNullOrEmpty(_searchTerm))
         {
-            filteredModelTypes = new List<Type>(modelTypes);
+            _filteredModelTypes = new List<Type>(_modelTypes);
         }
         else
         {
-            filteredModelTypes = modelTypes
-                .Where(type => type.Name.IndexOf(searchTerm, StringComparison.OrdinalIgnoreCase) >= 0)
+            _filteredModelTypes = _modelTypes
+                .Where(type => type.Name.IndexOf(_searchTerm, StringComparison.OrdinalIgnoreCase) >= 0)
                 .ToList();
         }
     }

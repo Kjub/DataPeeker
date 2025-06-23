@@ -3,13 +3,9 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
-using AtClient.Helpers.Functionality.Extensions;
-using Editor.Editor;
 using Game.Model;
-using Game.Model.Job;
 using Game.Model.ValueObjects;
 using Game.Presentation;
-using Newtonsoft.Json;
 using UnityEditor;
 using UnityEngine;
 using Material = UnityEngine.Material;
@@ -36,11 +32,20 @@ public class DataPeekerModelWindow : EditorWindow
     private string _searchTerm = "";
     private string _previousSearchTerm = "";
     private bool _isSearchActive = false;
+    private DataPeekerModelItem _selectedItem;
 
     private DataPeekerModelItem _root;
     private List<DataPeekerModelItem> _endElements;
 
-    private Texture2D lineTexture;
+    private Texture2D _lineTexture;
+    private bool _didFocusSearch = false;
+
+    [RuntimeInitializeOnLoadMethod]
+    private static void InitDataPeeker()
+    {
+        openWindows = new Dictionary<Type, DataPeekerModelWindow>();
+        typeCache = new Dictionary<Type, (FieldInfo[], PropertyInfo[])>();
+    }
 
     private void OnGUI()
     {
@@ -59,17 +64,49 @@ public class DataPeekerModelWindow : EditorWindow
 
     private void DrawTopOptions()
     {
-        _searchTerm = EditorGUILayout.TextField("Search", _previousSearchTerm);
+        GUILayout.BeginHorizontal(EditorStyles.toolbar);
+
+        GUI.SetNextControlName("SearchField");
+        string newSearchTerm = GUILayout.TextField(_searchTerm, GUI.skin.FindStyle("ToolbarSearchTextField"));
+
+        if (!string.IsNullOrEmpty(newSearchTerm))
+        {
+            if (GUILayout.Button("", GUI.skin.FindStyle("ToolbarSearchCancelButton")))
+            {
+                newSearchTerm = "";
+                GUI.FocusControl(null);
+            }
+        }
+
+        GUILayout.EndHorizontal();
+        GUILayout.Space(5f);
+
+        if (!_didFocusSearch)
+        {
+            EditorGUI.FocusTextInControl("SearchField");
+            _didFocusSearch = true;
+        }
+
+        if (newSearchTerm != _searchTerm)
+        {
+            _searchTerm = newSearchTerm;
+            UpdateSearchMatches(_searchTerm);
+        }
     }
+
 
     private void UpdateSearchMatches(string searchTerm)
     {
         ResetSearchMatches(); // First reset all search matches to false
         if (string.IsNullOrEmpty(searchTerm))
         {
-            // If no search term is provided, set everything to match
             _isSearchActive = false;
             SetSearchMatch(_root, true);
+
+            if (_selectedItem != null)
+            {
+                ExpandToItem(_selectedItem);
+            }
         }
         else
         {
@@ -80,6 +117,16 @@ public class DataPeekerModelWindow : EditorWindow
             {
                 CheckAndMarkUpwards(leaf, queries);
             }
+        }
+    }
+    
+    private void ExpandToItem(DataPeekerModelItem item)
+    {
+        while (item != null)
+        {
+            item.IsExpanded = true;
+            item.IsExpandedBySearch = true;
+            item = item.Parent;
         }
     }
 
@@ -243,6 +290,7 @@ public class DataPeekerModelWindow : EditorWindow
             }
             catch(Exception ex)
             {
+                Debug.Log($"Error accessing property {capturedProperty.Name} on {obj.GetType().Name}: {ex.Message}");
                 propertyValue = null;
             }
             DataPeekerModelItem dataPeekerModelItem = new DataPeekerModelItem(capturedProperty.Name, propertyValue, capturedProperty.PropertyType, indentLevel, parent, isBackingField: isBackingField);
@@ -266,6 +314,7 @@ public class DataPeekerModelWindow : EditorWindow
             }
             catch(Exception ex)
             {
+                Debug.Log($"Error accessing field {capturedField.Name} on {obj.GetType().Name}: {ex.Message}");
                 fieldValue = null;
             }
             
@@ -330,8 +379,8 @@ public class DataPeekerModelWindow : EditorWindow
         float labelHeight = EditorGUIUtility.singleLineHeight;
 
         // Calculate available space for the label
-        float labelWidth = 300;
-        EditorGUIUtility.labelWidth = labelWidth;
+        float previousLabelWidth = EditorGUIUtility.labelWidth;
+        EditorGUIUtility.labelWidth = 300;
 
         Rect rect = EditorGUILayout.BeginVertical("box");
         GUILayout.Space(1f);
@@ -352,6 +401,7 @@ public class DataPeekerModelWindow : EditorWindow
         {
             string displayValue = item.Value == null ? "null" : item.Value.ToString();
             EditorGUILayout.LabelField(CreateIndentedLabel(item.IndentLevel, item.Name), displayValue, GUILayout.Height(labelHeight));
+            
             DrawHierarchyLines(item.IndentLevel, rect);
             EditorGUILayout.EndVertical();
             EditorGUILayout.EndVertical();
@@ -363,6 +413,8 @@ public class DataPeekerModelWindow : EditorWindow
 
         EditorGUILayout.EndVertical();
         EditorGUILayout.EndVertical();
+        
+        EditorGUIUtility.labelWidth = previousLabelWidth; // Restore the label width
     }
 
     private void DrawItemField(DataPeekerModelItem item, float labelHeight)
@@ -421,7 +473,7 @@ public class DataPeekerModelWindow : EditorWindow
         }
         else if (item.Type.IsClass || (item.Type.IsValueType && !item.Type.IsPrimitive && !item.Type.IsEnum))
         {
-            if (IsItemExpanded(item, $"{item.Name} ({item.Type.Name}) | {item.IsExpanded} | {item.IsExpandedBySearch}"))
+            if (IsItemExpanded(item, $"{item.Name} ({item.Type.Name})"))
             {
                 DisplayModelHierarchy(item);
             }
@@ -479,7 +531,7 @@ public class DataPeekerModelWindow : EditorWindow
     private void OnEnable()
     {
         EditorApplication.update += OnEditorUpdate;
-        if (lineTexture == null)
+        if (_lineTexture == null)
         {
             InitializeLineTexture();
         }
@@ -544,41 +596,67 @@ public class DataPeekerModelWindow : EditorWindow
     {
         if (item == null)
             return false;
-        
-        if (_isSearchActive == true)
+
+        // Reserve space for the foldout
+        Rect itemRect = GUILayoutUtility.GetRect(18f, 18f, GUILayout.ExpandWidth(true));
+
+        // Get triangle area manually (16x16 box on left), rest is label
+        float triangleSize = 16f;
+        Rect triangleRect = new Rect(itemRect.x + EditorGUI.indentLevel * 15f, itemRect.y, triangleSize, triangleSize);
+        bool clickedLabel = itemRect.Contains(Event.current.mousePosition) && !triangleRect.Contains(Event.current.mousePosition);
+
+        // Handle selection if clicking the label (not the arrow)
+        if (Event.current.type == EventType.MouseDown && clickedLabel)
         {
-            item.IsExpandedBySearch = EditorGUILayout.Foldout(item.IsExpandedBySearch, CreateIndentedLabel(item.IndentLevel, label), true);
+            _selectedItem = item;
+            GUI.FocusControl(null);
+            Repaint();
+        }
+
+        // Draw selection background
+        if (_selectedItem == item)
+        {
+            Color selColor = new Color(0.24f, 0.49f, 0.90f, 0.15f);
+            EditorGUI.DrawRect(itemRect, selColor);
+        }
+
+        // Draw the foldout
+        EditorGUI.indentLevel = item.IndentLevel;
+        if (_isSearchActive)
+        {
+            item.IsExpandedBySearch = EditorGUI.Foldout(itemRect, item.IsExpandedBySearch, label, true);
             return item.IsExpandedBySearch;
         }
-        
-        item.IsExpanded = EditorGUILayout.Foldout(item.IsExpanded, CreateIndentedLabel(item.IndentLevel, label), true);
+
+        item.IsExpanded = EditorGUI.Foldout(itemRect, item.IsExpanded, label, true);
         return item.IsExpanded;
     }
 
+
     private void InitializeLineTexture()
     {
-        lineTexture = new Texture2D(1, 1);
-        lineTexture.SetPixel(0, 0, Color.gray);
-        lineTexture.Apply();
+        _lineTexture = new Texture2D(1, 1);
+        _lineTexture.SetPixel(0, 0, Color.gray);
+        _lineTexture.Apply();
     }
 
     private void OnDisable()
     {
-        EditorApplication.update -= OnEditorUpdate;
-        if (lineTexture != null)
+        if (_lineTexture != null)
         {
-            DestroyImmediate(lineTexture);
-            lineTexture = null;
+            DestroyImmediate(_lineTexture);
+            _lineTexture = null;
         }
     }
 
     private void OnDestroy()
     {
+        EditorApplication.update -= OnEditorUpdate;
         openWindows?.Remove(_modelType);
-        if (lineTexture != null)
+        if (_lineTexture != null)
         {
-            DestroyImmediate(lineTexture);
-            lineTexture = null;
+            DestroyImmediate(_lineTexture);
+            _lineTexture = null;
         }
     }
 
@@ -589,16 +667,16 @@ public class DataPeekerModelWindow : EditorWindow
 
     private void DrawHierarchyLines(int depth, Rect rect)
     {
-        if (lineTexture == null) InitializeLineTexture();
+        if (_lineTexture == null) InitializeLineTexture();
 
         for (int i = 0; i < depth; i++)
         {
             float indent = 20 * i + 10; // Adjust based on your indentation logic
-            GUI.DrawTexture(new Rect(indent, rect.yMin, 2, rect.height), lineTexture);
+            GUI.DrawTexture(new Rect(indent, rect.yMin, 2, rect.height), _lineTexture);
             if (i == depth - 1)
             {
                 // Draw horizontal line to the text
-                GUI.DrawTexture(new Rect(indent, rect.yMin + rect.height / 2, 10, 2), lineTexture);
+                GUI.DrawTexture(new Rect(indent, rect.yMin + rect.height / 2, 10, 2), _lineTexture);
             }
         }
     }
