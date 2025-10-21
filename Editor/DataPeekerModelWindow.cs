@@ -408,6 +408,17 @@ public class DataPeekerModelWindow : EditorWindow
             return;
         }
 
+		if (item.Type.IsGenericType && item.Type.GetGenericTypeDefinition() == typeof(Nullable<>))
+		{
+    		// Show HasValue and Value fields
+    		var value = item.Type.GetProperty("Value").GetValue(item.Value, null);
+    		EditorGUILayout.LabelField(CreateIndentedLabel(item.IndentLevel, item.Name), value?.ToString() ?? "null");
+    		DrawHierarchyLines(item.IndentLevel, rect);
+    		EditorGUILayout.EndVertical();
+    		EditorGUILayout.EndVertical();
+    		return;
+		}
+
         DrawItemField(item, labelHeight);
         DrawHierarchyLines(item.IndentLevel, rect);
 
