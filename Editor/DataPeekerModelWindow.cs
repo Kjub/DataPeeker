@@ -6,9 +6,9 @@ using System.Reflection;
 using Game.Model;
 using Game.Model.ValueObjects;
 using Game.Presentation;
+using Unity.Mathematics;
 using UnityEditor;
 using UnityEngine;
-using Material = UnityEngine.Material;
 
 public class DataPeekerModelWindow : EditorWindow
 {
@@ -26,7 +26,28 @@ public class DataPeekerModelWindow : EditorWindow
     private Color _backingFieldColor = new Color(1.0f, 0.65f, 0.0f);
     private bool _useColor1 = true;
 
-    private HashSet<Type> _simpleTypes = new HashSet<Type> { typeof(DateTime), typeof(decimal), typeof(TimeSpan), typeof(ItemCollectionVO), typeof(Material), typeof(IPrice) };
+    private HashSet<Type> _simpleTypes = new HashSet<Type>
+    {
+        typeof(DateTime),
+        typeof(decimal),
+        typeof(TimeSpan),
+        typeof(ItemCollectionVO),
+        typeof(int2),
+        typeof(int3),
+        typeof(int4),
+        typeof(Transform),
+        typeof(GameObject),
+        typeof(IPrice)
+    };
+
+    // NEW: treat all types under these namespaces as "simple"
+    // Example: "Unity.Mathematics" covers int2/int3/etc (and any other structs in that namespace)
+    private HashSet<string> _simpleNamespaces = new HashSet<string>
+    {
+        "Unity.Mathematics",
+        "UnityEngine"
+    };
+
     private HashSet<Type> _ignoredTypes = new HashSet<Type> { typeof(GameModelContext), typeof(PresentationContext) };
 
     private string _searchTerm = "";
@@ -94,7 +115,6 @@ public class DataPeekerModelWindow : EditorWindow
         }
     }
 
-
     private void UpdateSearchMatches(string searchTerm)
     {
         ResetSearchMatches(); // First reset all search matches to false
@@ -119,7 +139,7 @@ public class DataPeekerModelWindow : EditorWindow
             }
         }
     }
-    
+
     private void ExpandToItem(DataPeekerModelItem item)
     {
         while (item != null)
@@ -194,7 +214,8 @@ public class DataPeekerModelWindow : EditorWindow
             if (openWindows.Count > 0)
             {
                 Rect existingWindowPosition = openWindows.Values.First().position;
-                peekerModelWindow.position = new Rect(existingWindowPosition.x + 30, existingWindowPosition.y + 30, existingWindowPosition.width, existingWindowPosition.height);
+                peekerModelWindow.position = new Rect(existingWindowPosition.x + 30, existingWindowPosition.y + 30,
+                    existingWindowPosition.width, existingWindowPosition.height);
             }
 
             peekerModelWindow.Show();
@@ -206,7 +227,7 @@ public class DataPeekerModelWindow : EditorWindow
     {
         _root = new DataPeekerModelItem(); // Create the root node
         _endElements = new List<DataPeekerModelItem>();
-        
+
         if (Application.isPlaying == false)
         {
             _modelInstance = Activator.CreateInstance(_modelType);
@@ -226,7 +247,7 @@ public class DataPeekerModelWindow : EditorWindow
                 _isDefaultInstance = true;
             }
         }
-        
+
         _root.Children.AddRange(BuildModelHierarchy(_modelInstance, _modelType, 0, _root));
         CollectEndElements(_root);
     }
@@ -246,18 +267,18 @@ public class DataPeekerModelWindow : EditorWindow
         }
     }
 
-
     private List<DataPeekerModelItem> BuildModelHierarchy(object obj, Type type, int indentLevel, DataPeekerModelItem parent = null)
     {
         List<DataPeekerModelItem> modelItems = new List<DataPeekerModelItem>();
-        
+
         if (obj == null || _visitedObjects.Contains(obj))
             return modelItems;
-        
+
         _visitedObjects.Add(obj);
 
         (FieldInfo[] fields, PropertyInfo[] properties) = GetTypeProperties(type);
         var backingFields = new Dictionary<string, FieldInfo>();
+        var ignoredFields = new HashSet<string>();
 
         // Collect all relevant backing fields in a dictionary
         foreach (FieldInfo field in fields)
@@ -271,58 +292,97 @@ public class DataPeekerModelWindow : EditorWindow
         // Process properties
         foreach (PropertyInfo property in properties)
         {
-            if (!property.CanRead || _ignoredTypes.Contains(property.PropertyType) || property.GetIndexParameters().Length > 0)
-            {
-                continue;
-            }
-
-            string backingFieldName = $"<{property.Name}>k__BackingField";
-            bool isBackingField = backingFields.ContainsKey(backingFieldName);
-            
-            if (!property.CanWrite && isBackingField)
-                continue;
-
-            PropertyInfo capturedProperty = property;
-            object propertyValue = null;
             try
             {
-                propertyValue = capturedProperty.GetValue(obj);
-            }
-            catch(Exception ex)
-            {
-                Debug.Log($"Error accessing property {capturedProperty.Name} on {obj.GetType().Name}: {ex.Message}");
-                propertyValue = null;
-            }
-            DataPeekerModelItem dataPeekerModelItem = new DataPeekerModelItem(capturedProperty.Name, propertyValue, capturedProperty.PropertyType, indentLevel, parent, isBackingField: isBackingField);
-            dataPeekerModelItem.SetBinding(() => propertyValue, capturedProperty.CanWrite == true ? newValue => capturedProperty.SetValue(obj, newValue) : null);
-            ProcessValue(propertyValue, capturedProperty.PropertyType, indentLevel, dataPeekerModelItem);
+                if (property.CanRead == false || _ignoredTypes.Contains(property.PropertyType) || property.GetIndexParameters().Length > 0)
+                {
+                    continue;
+                }
 
-            modelItems.Add(dataPeekerModelItem);
+                string backingFieldName = $"<{property.Name}>k__BackingField";
+                bool isBackingField = backingFields.ContainsKey(backingFieldName);
+
+                if (!property.CanWrite && isBackingField)
+                    continue;
+
+                PropertyInfo capturedProperty = property;
+                object propertyValue = null;
+                try
+                {
+                    propertyValue = capturedProperty.GetValue(obj);
+                }
+                catch (Exception ex)
+                {
+                    Debug.Log($"Error accessing property {capturedProperty.Name} on {obj.GetType().Name}: {ex.Message}");
+                    propertyValue = null;
+                }
+
+                DataPeekerModelItem dataPeekerModelItem = new DataPeekerModelItem(
+                    capturedProperty.Name,
+                    propertyValue,
+                    capturedProperty.PropertyType,
+                    indentLevel,
+                    parent,
+                    isBackingField: isBackingField);
+
+                dataPeekerModelItem.SetBinding(
+                    () => propertyValue,
+                    capturedProperty.CanWrite == true ? newValue => capturedProperty.SetValue(obj, newValue) : null);
+
+                ProcessValue(propertyValue, capturedProperty.PropertyType, indentLevel, dataPeekerModelItem);
+
+                modelItems.Add(dataPeekerModelItem);
+            }
+            catch (Exception ex)
+            {
+                DataPeekerModelItem dataPeekerModelItem = new DataPeekerModelItem(property.Name, "Cannot be accessed",
+                    typeof(string), indentLevel, parent, isBackingField: false);
+
+                modelItems.Add(dataPeekerModelItem);
+                Debug.Log($"Error processing property {property.Name} on {obj.GetType().Name}: {ex.Message}");
+            }
         }
 
         // Process fields
         foreach (FieldInfo field in fields)
         {
-            if (backingFields.ContainsKey(field.Name) || _ignoredTypes.Contains(field.FieldType))
-                continue;
-
-            FieldInfo capturedField = field;
-            object fieldValue = null;
             try
             {
-                fieldValue = capturedField.GetValue(obj);
-            }
-            catch(Exception ex)
-            {
-                Debug.Log($"Error accessing field {capturedField.Name} on {obj.GetType().Name}: {ex.Message}");
-                fieldValue = null;
-            }
-            
-            DataPeekerModelItem dataPeekerModelItem = new DataPeekerModelItem(capturedField.Name, fieldValue, capturedField.FieldType, indentLevel, parent);
-            dataPeekerModelItem.SetBinding(() => fieldValue, newValue => capturedField.SetValue(obj, newValue));
-            ProcessValue(fieldValue, capturedField.FieldType, indentLevel, dataPeekerModelItem);
+                if (backingFields.ContainsKey(field.Name) || _ignoredTypes.Contains(field.FieldType))
+                    continue;
 
-            modelItems.Add(dataPeekerModelItem);
+                FieldInfo capturedField = field;
+                object fieldValue = null;
+                try
+                {
+                    fieldValue = capturedField.GetValue(obj);
+                }
+                catch (Exception ex)
+                {
+                    Debug.Log($"Error accessing field {capturedField.Name} on {obj.GetType().Name}: {ex.Message}");
+                    fieldValue = null;
+                }
+
+                DataPeekerModelItem dataPeekerModelItem = new DataPeekerModelItem(
+                    capturedField.Name,
+                    fieldValue,
+                    capturedField.FieldType,
+                    indentLevel,
+                    parent);
+
+                dataPeekerModelItem.SetBinding(() => fieldValue, newValue => capturedField.SetValue(obj, newValue));
+                ProcessValue(fieldValue, capturedField.FieldType, indentLevel, dataPeekerModelItem);
+
+                modelItems.Add(dataPeekerModelItem);
+            }
+            catch (Exception ex)
+            {
+                DataPeekerModelItem dataPeekerModelItem = new DataPeekerModelItem(field.Name, "Cannot be accessed",
+                    typeof(string), indentLevel, parent, isBackingField: false);
+
+                modelItems.Add(dataPeekerModelItem);
+                Debug.Log($"Error processing field {field.Name} on {obj.GetType().Name}: {ex.Message}");
+            }
         }
 
         _visitedObjects.Remove(obj);
@@ -338,10 +398,16 @@ public class DataPeekerModelWindow : EditorWindow
             {
                 for (int i = 0; i < list.Count; i++)
                 {
-                    // Create a new DataPeekerModelItem for each element in the list
-                    DataPeekerModelItem item = new DataPeekerModelItem($"Item {i}", list[i], list[i]?.GetType() ?? type, indentLevel + 1, parent);
-                    // Recursively build the hierarchy for each element, using the current item as parent
-                    item.Children.AddRange(BuildModelHierarchy(list[i], list[i]?.GetType() ?? type, indentLevel + 2, item));
+                    Type elementType = list[i]?.GetType() ?? type;
+
+                    DataPeekerModelItem item = new DataPeekerModelItem($"Item {i}", list[i], elementType, indentLevel + 1, parent);
+
+                    // NEW: don't expand list elements that are "simple" by type or namespace
+                    if (list[i] != null && !IsSystemType(elementType) && !IsSimpleTypeOrNamespace(elementType))
+                    {
+                        item.Children.AddRange(BuildModelHierarchy(list[i], elementType, indentLevel + 2, item));
+                    }
+
                     parent.Children.Add(item);
                 }
             }
@@ -353,24 +419,69 @@ public class DataPeekerModelWindow : EditorWindow
             {
                 foreach (DictionaryEntry entry in dictionary)
                 {
-                    // Create a new DataPeekerModelItem for each entry in the dictionary
-                    DataPeekerModelItem item = new DataPeekerModelItem($"{entry.Key}", entry.Value, entry.Value?.GetType() ?? type, indentLevel + 1, parent);
-                    // Recursively build the hierarchy for the value of each dictionary entry, using the current item as parent
-                    item.Children.AddRange(BuildModelHierarchy(entry.Value, entry.Value?.GetType() ?? type, indentLevel + 2, item));
+                    Type valueType = entry.Value?.GetType() ?? type;
+
+                    DataPeekerModelItem item = new DataPeekerModelItem($"{entry.Key}", entry.Value, valueType, indentLevel + 1, parent);
+
+                    // NEW: don't expand dictionary values that are "simple" by type or namespace
+                    if (entry.Value != null && !IsSystemType(valueType) && !IsSimpleTypeOrNamespace(valueType))
+                    {
+                        item.Children.AddRange(BuildModelHierarchy(entry.Value, valueType, indentLevel + 2, item));
+                    }
+
                     parent.Children.Add(item);
                 }
             }
         }
-        else if (!IsSystemType(type))
+        else
         {
-            // If the type is not a system type, directly build the hierarchy for this object
-            parent.Children.AddRange(BuildModelHierarchy(value, type, indentLevel + 1, parent));
+            // NEW: skip expanding for "simple namespaces" (e.g. Unity.Mathematics)
+            if (!IsSystemType(type) && !IsSimpleTypeOrNamespace(type))
+            {
+                parent.Children.AddRange(BuildModelHierarchy(value, type, indentLevel + 1, parent));
+            }
         }
     }
 
     private bool IsSystemType(Type type)
     {
         return type.Namespace != null && (type.Namespace.StartsWith("System") || type.Namespace.StartsWith("Microsoft"));
+    }
+
+    // NEW: wraps your existing _simpleTypes and adds namespace support
+    private bool IsSimpleTypeOrNamespace(Type type)
+    {
+        if (type == null)
+            return true;
+
+        // Treat Nullable<T> as "T" for the purpose of this check
+        Type underlying = Nullable.GetUnderlyingType(type);
+        if (underlying != null)
+            type = underlying;
+
+        if (_simpleTypes.Contains(type))
+            return true;
+
+        return IsTypeInSimpleNamespaces(type);
+    }
+
+    private bool IsTypeInSimpleNamespaces(Type type)
+    {
+        string ns = type.Namespace;
+        if (string.IsNullOrEmpty(ns))
+            return false;
+
+        foreach (string simpleNs in _simpleNamespaces)
+        {
+            // exact namespace or any sub-namespace
+            if (ns.Equals(simpleNs, StringComparison.Ordinal) ||
+                ns.StartsWith(simpleNs + ".", StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private void DisplayModelItem(DataPeekerModelItem item)
@@ -397,41 +508,42 @@ public class DataPeekerModelWindow : EditorWindow
         EditorGUILayout.BeginVertical();
         GUI.backgroundColor = originalColor;
 
-        if (item.Value == null || _simpleTypes.Contains(item.Type))
+        // UPDATED: use IsSimpleTypeOrNamespace instead of only _simpleTypes
+        if (item.Value == null || IsSimpleTypeOrNamespace(item.Type))
         {
             string displayValue = item.Value == null ? "null" : item.Value.ToString();
             EditorGUILayout.LabelField(CreateIndentedLabel(item.IndentLevel, item.Name), displayValue, GUILayout.Height(labelHeight));
-            
+
             DrawHierarchyLines(item.IndentLevel, rect);
             EditorGUILayout.EndVertical();
             EditorGUILayout.EndVertical();
             return;
         }
 
-		if (item.Type.IsGenericType && item.Type.GetGenericTypeDefinition() == typeof(Nullable<>))
-		{
-    		// Show HasValue and Value fields
-    		var value = item.Type.GetProperty("Value").GetValue(item.Value, null);
-    		EditorGUILayout.LabelField(CreateIndentedLabel(item.IndentLevel, item.Name), value?.ToString() ?? "null");
-    		DrawHierarchyLines(item.IndentLevel, rect);
-    		EditorGUILayout.EndVertical();
-    		EditorGUILayout.EndVertical();
-    		return;
-		}
+        if (item.Type.IsGenericType && item.Type.GetGenericTypeDefinition() == typeof(Nullable<>))
+        {
+            // Show HasValue and Value fields
+            var value = item.Type.GetProperty("Value").GetValue(item.Value, null);
+            EditorGUILayout.LabelField(CreateIndentedLabel(item.IndentLevel, item.Name), value?.ToString() ?? "null");
+            DrawHierarchyLines(item.IndentLevel, rect);
+            EditorGUILayout.EndVertical();
+            EditorGUILayout.EndVertical();
+            return;
+        }
 
         DrawItemField(item, labelHeight);
         DrawHierarchyLines(item.IndentLevel, rect);
 
         EditorGUILayout.EndVertical();
         EditorGUILayout.EndVertical();
-        
+
         EditorGUIUtility.labelWidth = previousLabelWidth; // Restore the label width
     }
 
     private void DrawItemField(DataPeekerModelItem item, float labelHeight)
     {
         // Handle different types with specific UI controls
-        GUILayoutOption[] guiLayoutOption =  {GUILayout.Height(labelHeight), GUILayout.MinWidth(150)};
+        GUILayoutOption[] guiLayoutOption = { GUILayout.Height(labelHeight), GUILayout.MinWidth(150) };
 
         string indentedLabel = CreateIndentedLabel(item.IndentLevel, item.Name);
         if (item.Type == typeof(int) || item.Type == typeof(int?))
@@ -464,14 +576,14 @@ public class DataPeekerModelWindow : EditorWindow
         {
             EditorGUILayout.BeginHorizontal();
             EditorGUILayout.LabelField(indentedLabel, GUILayout.Height(labelHeight));
-            item.SetBoundValue(EditorGUILayout.Vector3Field(GUIContent.none,(Vector3)item.Value, guiLayoutOption));
+            item.SetBoundValue(EditorGUILayout.Vector3Field(GUIContent.none, (Vector3)item.Value, guiLayoutOption));
             EditorGUILayout.EndHorizontal();
         }
         else if (item.Type == typeof(Vector4) || item.Type == typeof(Vector4?))
         {
             EditorGUILayout.BeginHorizontal();
             EditorGUILayout.LabelField(indentedLabel, GUILayout.Height(labelHeight));
-            item.SetBoundValue(EditorGUILayout.Vector4Field(GUIContent.none,(Vector4)item.Value, guiLayoutOption));
+            item.SetBoundValue(EditorGUILayout.Vector4Field(GUIContent.none, (Vector4)item.Value, guiLayoutOption));
             EditorGUILayout.EndHorizontal();
         }
         else if (typeof(IList).IsAssignableFrom(item.Type))
@@ -494,8 +606,6 @@ public class DataPeekerModelWindow : EditorWindow
             GUILayout.Label(indentedLabel + ": " + item.Value, guiLayoutOption);
             GUILayout.Space(labelHeight);
         }
-        
-
     }
 
     private void CreateBackingFieldLabel(DataPeekerModelItem item)
@@ -572,12 +682,12 @@ public class DataPeekerModelWindow : EditorWindow
         IList list = itemValue as IList;
         if (list == null)
             return;
-        
+
         if (IsItemExpanded(item, $"{item.Name} (List) [{list.Count}]") == false)
         {
             return;
         }
-        
+
         foreach (DataPeekerModelItem child in item.Children)
         {
             if (child.MatchesSearch == true)
@@ -602,7 +712,7 @@ public class DataPeekerModelWindow : EditorWindow
             }
         }
     }
-    
+
     private bool IsItemExpanded(DataPeekerModelItem item, string label)
     {
         if (item == null)
@@ -642,7 +752,6 @@ public class DataPeekerModelWindow : EditorWindow
         item.IsExpanded = EditorGUI.Foldout(itemRect, item.IsExpanded, label, true);
         return item.IsExpanded;
     }
-
 
     private void InitializeLineTexture()
     {

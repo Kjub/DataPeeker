@@ -1,5 +1,10 @@
 # Changelog
 
+### [0.3.2] - 2026-01-29
+
+#### Added
+ - Simplification of types based on namespace (simplify all data elements if they are from namespace "UnityEngine" for example)
+
 ### [0.3.1] - 2025-10-21
 
 #### Fixed
