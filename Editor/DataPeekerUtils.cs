@@ -1,4 +1,4 @@
-namespace Editor.Editor
+namespace Kjub.DataPeeker.Editor
 {
     public static class DataPeekerUtils
     {
