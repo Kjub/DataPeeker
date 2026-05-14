@@ -113,6 +113,11 @@ namespace Kjub.DataPeeker.Editor
             }
 
             _scrollPosition = EditorGUILayout.BeginScrollView(_scrollPosition);
+            _visibleRowIndex = 0;
+            _didFindSelectedItemRect = false;
+            DisplayModelHierarchy(_root); // Start from the root node
+            EditorGUILayout.EndScrollView();
+
             if (Event.current.type == EventType.Repaint)
             {
                 Rect currentScrollViewRect = GUILayoutUtility.GetLastRect();
@@ -122,10 +127,6 @@ namespace Kjub.DataPeeker.Editor
                 }
             }
 
-            _visibleRowIndex = 0;
-            _didFindSelectedItemRect = false;
-            DisplayModelHierarchy(_root); // Start from the root node
-            EditorGUILayout.EndScrollView();
             ScrollSelectedItemIntoViewIfNeeded();
         }
 

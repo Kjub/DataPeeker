@@ -1,5 +1,13 @@
 # Changelog
 
+### [0.4] - 2026-05-14
+
+#### Added
+ - Color based on how deep the user is, its easier to distinguish the elements based on depth
+
+#### Fixed
+ - Fixed the issue with infinite loop when model had an item that references itself
+
 ### [0.3.2] - 2026-01-29
 
 #### Added
