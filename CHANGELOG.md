@@ -1,6 +1,6 @@
 # Changelog
 
-### [0.4] - 2026-05-14
+### [0.4.0] - 2026-05-14
 
 #### Added
  - Color based on how deep the user is, its easier to distinguish the elements based on depth
