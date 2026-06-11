@@ -26,6 +26,9 @@ namespace Kjub.DataPeeker.Editor
         private static Dictionary<Type, (FieldInfo[], PropertyInfo[])> typeCache = new Dictionary<Type, (FieldInfo[], PropertyInfo[])>();
         private static readonly IEqualityComparer<object> ReferenceComparer = new ReferenceEqualityComparer();
 
+        // Survives domain reloads; everything else is rebuilt from it in OnEnable
+        [SerializeField] private string _modelTypeName;
+
         private Type _modelType;
         private object _modelInstance;
         private bool _isDefaultInstance;
@@ -97,8 +100,17 @@ namespace Kjub.DataPeeker.Editor
         [RuntimeInitializeOnLoadMethod]
         private static void InitDataPeeker()
         {
-            openWindows = new Dictionary<Type, DataPeekerModelWindow>();
-            typeCache = new Dictionary<Type, (FieldInfo[], PropertyInfo[])>();
+            // Don't recreate the dictionary: open windows re-register in OnEnable before this
+            // runs, and with domain reload disabled the existing entries are still valid.
+            List<Type> deadEntries = openWindows
+                .Where(pair => pair.Value == null)
+                .Select(pair => pair.Key)
+                .ToList();
+
+            foreach (Type deadEntry in deadEntries)
+            {
+                openWindows.Remove(deadEntry);
+            }
         }
 
         private void OnGUI()
@@ -259,6 +271,7 @@ namespace Kjub.DataPeeker.Editor
             {
                 DataPeekerModelWindow peekerModelWindow = CreateInstance<DataPeekerModelWindow>();
                 peekerModelWindow._modelType = modelType;
+                peekerModelWindow._modelTypeName = modelType.AssemblyQualifiedName;
                 peekerModelWindow.InitializeModelInstance();
                 peekerModelWindow.titleContent = new GUIContent(modelType.Name);
 
@@ -1102,6 +1115,26 @@ namespace Kjub.DataPeeker.Editor
         private void OnEnable()
         {
             EditorApplication.update += OnEditorUpdate;
+            TryRecoverAfterDomainReload();
+        }
+
+        private void TryRecoverAfterDomainReload()
+        {
+            if (_modelType != null || string.IsNullOrEmpty(_modelTypeName))
+            {
+                return;
+            }
+
+            _modelType = Type.GetType(_modelTypeName);
+
+            if (_modelType == null)
+            {
+                Debug.LogWarning($"Data Peeker could not resolve model type '{_modelTypeName}' after domain reload.");
+                return;
+            }
+
+            openWindows[_modelType] = this;
+            InitializeModelInstance();
         }
 
         private void OnEditorUpdate()
@@ -1202,7 +1235,14 @@ namespace Kjub.DataPeeker.Editor
         private void OnDestroy()
         {
             EditorApplication.update -= OnEditorUpdate;
-            openWindows?.Remove(_modelType);
+
+            if (_modelType != null &&
+                openWindows != null &&
+                openWindows.TryGetValue(_modelType, out DataPeekerModelWindow registeredWindow) &&
+                registeredWindow == this)
+            {
+                openWindows.Remove(_modelType);
+            }
         }
 
         private string CreateIndentedLabel(int indentLevel, string label)

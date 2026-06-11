@@ -1,5 +1,12 @@
 # Changelog
 
+### [0.4.1] - 2026-06-11
+
+#### Fixed
+ - Model windows now survive domain reloads (script recompile, entering play mode) instead of going blank — the model type is serialized and the tree is rebuilt on reload
+ - Reopening a model after a domain reload focuses the existing window instead of opening a duplicate
+ - Closing a stale window no longer unregisters a freshly opened window of the same model type
+
 ### [0.4.0] - 2026-05-14
 
 #### Added
