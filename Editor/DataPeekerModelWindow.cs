@@ -792,6 +792,14 @@ namespace Kjub.DataPeeker.Editor
 
             string indentedLabel = CreateIndentedLabel(item.IndentLevel, item.Name);
             Type currentType = item.Value?.GetType() ?? item.Type;
+
+            // On live models the value can turn null between GUI passes; the editable branches below cast Value directly
+            if (item.Value == null)
+            {
+                EditorGUILayout.LabelField(indentedLabel, "null", GUILayout.Height(labelHeight));
+                return;
+            }
+
             if (item.Type == typeof(int) || item.Type == typeof(int?))
             {
                 EditorGUILayout.BeginHorizontal();

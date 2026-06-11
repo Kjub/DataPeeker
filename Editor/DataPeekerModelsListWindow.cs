@@ -24,8 +24,7 @@ namespace Kjub.DataPeeker.Editor
         private List<Type> _filteredModelTypes;
         private string _searchTerm = "";
         private Vector2 _scrollPosition;
-        private bool _focusSearchNextFrame = true;
-    
+
         [RuntimeInitializeOnLoadMethod]
         private static void InitDataPeekerModelList()
         {
@@ -129,16 +128,12 @@ namespace Kjub.DataPeeker.Editor
                         continue;
                     }
 
-                    Debug.Log($"Found manager behaviour type: {type.FullName}");
-
                     UnityEngine.Object found = FindAnyObjectByType(type);
 
                     if (found == null)
                     {
                         continue;
                     }
-
-                    Debug.Log($"Found instance: {found.name}");
 
                     // Reflection access because we cannot cast to ManagerBehaviourBase<ManagerBase>
                     PropertyInfo contextProperty = type.GetProperty(

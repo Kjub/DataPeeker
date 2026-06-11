@@ -1,5 +1,11 @@
 # Changelog
 
+### [0.4.2] - 2026-06-11
+
+#### Fixed
+ - Editable field controls no longer throw when a value on a live model turns null mid-frame
+ - package.json license corrected to MIT to match the LICENSE file
+
 ### [0.4.1] - 2026-06-11
 
 #### Fixed
