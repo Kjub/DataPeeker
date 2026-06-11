@@ -1,5 +1,10 @@
 # Changelog
 
+### [0.4.3] - 2026-06-11
+
+#### Added
+ - Focus button on search results — appears on entries that match the search; clicking it clears the search and jumps to the entry with everything else collapsed
+
 ### [0.4.2] - 2026-06-11
 
 #### Fixed

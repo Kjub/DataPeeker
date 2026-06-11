@@ -14,6 +14,7 @@ namespace Kjub.DataPeeker.Editor
         public bool IsExpanded { get; set; }
         public bool IsExpandedBySearch { get; set; }
         public bool MatchesSearch { get; set; }
+        public bool MatchesSearchSelf { get; set; }
         public DataPeekerModelItem Parent { get; set; }
         public bool IsBackingField { get; set; }  // Track if this item is a backing field
         

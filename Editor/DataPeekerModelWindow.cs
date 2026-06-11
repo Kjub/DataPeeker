@@ -21,6 +21,10 @@ namespace Kjub.DataPeeker.Editor
         private const float FoldoutOffsetFromLine = 12f;
         private const float FoldoutTriangleSize = 16f;
         private const float ConnectorEndPadding = 2f;
+        private const float FocusButtonWidth = 30f;
+        private const float FocusButtonRightPadding = 4f;
+
+        private static GUIContent focusButtonContent;
 
         private static Dictionary<Type, DataPeekerModelWindow> openWindows = new Dictionary<Type, DataPeekerModelWindow>();
         private static Dictionary<Type, (FieldInfo[], PropertyInfo[])> typeCache = new Dictionary<Type, (FieldInfo[], PropertyInfo[])>();
@@ -86,6 +90,7 @@ namespace Kjub.DataPeeker.Editor
         private string _searchTerm = "";
         private bool _isSearchActive = false;
         private DataPeekerModelItem _selectedItem;
+        private readonly List<Rect> _pendingFocusButtonRects = new List<Rect>();
 
         private DataPeekerModelItem _root;
 
@@ -128,6 +133,7 @@ namespace Kjub.DataPeeker.Editor
             _visibleRowIndex = 0;
             _didFindSelectedItemRect = false;
             DisplayModelHierarchy(_root); // Start from the root node
+            DrawPendingFocusButtons();
             EditorGUILayout.EndScrollView();
 
             if (Event.current.type == EventType.Repaint)
@@ -246,6 +252,7 @@ namespace Kjub.DataPeeker.Editor
             }
 
             item.MatchesSearch = matchesSelf || matchesChild;
+            item.MatchesSearchSelf = matchesSelf;
             item.IsExpandedBySearch = matchesChild;
             return item.MatchesSearch;
         }
@@ -253,6 +260,7 @@ namespace Kjub.DataPeeker.Editor
         private void SetSearchMatch(DataPeekerModelItem item, bool match)
         {
             item.MatchesSearch = match;
+            item.MatchesSearchSelf = false; // Only meaningful while a search is active
             item.IsExpandedBySearch = match; // Expand if it matches
 
             foreach (DataPeekerModelItem child in item.Children)
@@ -743,6 +751,12 @@ namespace Kjub.DataPeeker.Editor
                 int rowIndex = _visibleRowIndex++;
                 DrawRowBackground(rect, rowIndex, item);
                 CacheSelectedItemRect(rect, item);
+
+                if (_isSearchActive && item.MatchesSearchSelf)
+                {
+                    DrawFocusButton(GetRowHeaderRect(rect), item);
+                }
+
                 GUILayout.Space(1f);
 
                 // Add some content to the vertical layout before calling GetLastRect
@@ -965,6 +979,75 @@ namespace Kjub.DataPeeker.Editor
             EditorGUIUtility.editingTextField = false;
             GUI.FocusControl(null);
             GUIUtility.keyboardControl = 0;
+        }
+
+        private void FocusOnItem(DataPeekerModelItem item)
+        {
+            SelectItem(item, scrollIntoView: true);
+            _searchTerm = "";
+            UpdateSearchMatches(_searchTerm);
+        }
+
+        private void DrawFocusButton(Rect rowHeaderRect, DataPeekerModelItem item)
+        {
+            Rect buttonRect = new Rect(
+                rowHeaderRect.xMax - FocusButtonWidth - FocusButtonRightPadding,
+                rowHeaderRect.y + 1f,
+                FocusButtonWidth,
+                EditorGUIUtility.singleLineHeight);
+
+            Event currentEvent = Event.current;
+
+            // Handle the click manually so it wins over any value field underneath the button area
+            if (currentEvent.type == EventType.MouseDown && buttonRect.Contains(currentEvent.mousePosition))
+            {
+                FocusOnItem(item);
+                currentEvent.Use();
+                Repaint();
+                return;
+            }
+
+            // Defer the visual: row content drawn after this call would paint over the button
+            if (currentEvent.type == EventType.Repaint)
+            {
+                _pendingFocusButtonRects.Add(buttonRect);
+            }
+        }
+
+        private void DrawPendingFocusButtons()
+        {
+            if (Event.current.type != EventType.Repaint)
+            {
+                _pendingFocusButtonRects.Clear();
+                return;
+            }
+
+            GUIContent focusLabel = GetFocusButtonContent();
+
+            foreach (Rect buttonRect in _pendingFocusButtonRects)
+            {
+                bool isHovered = buttonRect.Contains(Event.current.mousePosition);
+                GUI.skin.button.Draw(buttonRect, focusLabel, isHovered, false, false, false);
+            }
+
+            _pendingFocusButtonRects.Clear();
+        }
+
+        private static GUIContent GetFocusButtonContent()
+        {
+            if (focusButtonContent != null)
+            {
+                return focusButtonContent;
+            }
+
+            string iconName = EditorGUIUtility.isProSkin ? "d_scenevis_visible_hover" : "scenevis_visible_hover";
+            GUIContent icon = EditorGUIUtility.IconContent(iconName);
+
+            focusButtonContent = icon != null && icon.image != null
+                ? new GUIContent(icon.image, "Focus this entry")
+                : new GUIContent("Focus", "Focus this entry");
+
+            return focusButtonContent;
         }
 
         private void NavigateVertical(int direction)
