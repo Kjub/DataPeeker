@@ -24,7 +24,39 @@ namespace Kjub.DataPeeker.Editor
         private const float FocusButtonWidth = 30f;
         private const float FocusButtonRightPadding = 4f;
 
+        // Row heights are a pure function of these constants so the virtualized layout
+        // can be computed without reflection or GUILayout measurement
+        private const float RowTopPadding = 5f;
+        private const float RowBottomPadding = 4f;
+        private const float BackingFieldExtraHeight = 20f;
+        private const float ViewportOverscan = 150f;
+        private const int MaxRowCacheRebuildAttempts = 4;
+
         private static GUIContent focusButtonContent;
+
+        private enum RowArchetype
+        {
+            Label,
+            EditableInt,
+            EditableFloat,
+            EditableString,
+            EditableBool,
+            EditableVector2,
+            EditableVector3,
+            EditableVector4,
+            FoldoutList,
+            FoldoutDictionary,
+            FoldoutObject,
+            FallbackLabel
+        }
+
+        private struct RowEntry
+        {
+            public DataPeekerModelItem Item;
+            public float Y;
+            public float Height;
+            public RowArchetype Archetype;
+        }
 
         private static Dictionary<Type, DataPeekerModelWindow> openWindows = new Dictionary<Type, DataPeekerModelWindow>();
         private static Dictionary<Type, (FieldInfo[], PropertyInfo[])> typeCache = new Dictionary<Type, (FieldInfo[], PropertyInfo[])>();
@@ -63,7 +95,15 @@ namespace Kjub.DataPeeker.Editor
         };
 
         private Color _backingFieldColor = new Color(1.0f, 0.65f, 0.0f);
-        private int _visibleRowIndex;
+
+        // Flat list of all rows visible given expansion/search state, rebuilt once per Layout
+        // event; only rows in [_firstDrawnRow, _lastDrawnRow] are actually drawn
+        private readonly List<RowEntry> _rowCache = new List<RowEntry>();
+        private readonly Dictionary<DataPeekerModelItem, int> _rowIndexByItem = new Dictionary<DataPeekerModelItem, int>();
+        private float _totalContentHeight;
+        private int _firstDrawnRow = -1;
+        private int _lastDrawnRow = -1;
+        private bool _didLazyLoadDuringCacheBuild;
 
         private HashSet<Type> _simpleTypes = new HashSet<Type>
         {
@@ -94,11 +134,8 @@ namespace Kjub.DataPeeker.Editor
 
         private DataPeekerModelItem _root;
 
-        private GUIStyle _rowStyle;
         private bool _treeHasKeyboardFocus;
         private bool _scrollSelectedItemIntoView;
-        private bool _didFindSelectedItemRect;
-        private Rect _selectedItemRect;
         private Rect _scrollViewRect;
         private bool _didFocusSearch = false;
 
@@ -129,10 +166,24 @@ namespace Kjub.DataPeeker.Editor
                 UpdateSearchMatches(_searchTerm);
             }
 
+            // The row cache is rebuilt only on Layout and reused verbatim by all other events
+            // of the frame, so the control sequence stays identical across passes
+            if (Event.current.type == EventType.Layout)
+            {
+                RebuildRowCache();
+            }
+
             _scrollPosition = EditorGUILayout.BeginScrollView(_scrollPosition);
-            _visibleRowIndex = 0;
-            _didFindSelectedItemRect = false;
-            DisplayModelHierarchy(_root); // Start from the root node
+
+            Rect contentRect = GUILayoutUtility.GetRect(0f, _totalContentHeight, GUILayout.ExpandWidth(true));
+
+            for (int i = _firstDrawnRow; i >= 0 && i <= _lastDrawnRow && i < _rowCache.Count; i++)
+            {
+                RowEntry entry = _rowCache[i];
+                Rect rowRect = new Rect(contentRect.x, contentRect.y + entry.Y, contentRect.width, entry.Height);
+                DrawRow(i, rowRect);
+            }
+
             DrawPendingFocusButtons();
             EditorGUILayout.EndScrollView();
 
@@ -144,8 +195,200 @@ namespace Kjub.DataPeeker.Editor
                     _scrollViewRect = currentScrollViewRect;
                 }
             }
+        }
 
-            ScrollSelectedItemIntoViewIfNeeded();
+        private void RebuildRowCache()
+        {
+            _rowCache.Clear();
+            _rowIndexByItem.Clear();
+            _totalContentHeight = 0f;
+            _firstDrawnRow = -1;
+            _lastDrawnRow = -1;
+
+            if (_root == null)
+            {
+                return;
+            }
+
+            for (int attempt = 0; attempt < MaxRowCacheRebuildAttempts; attempt++)
+            {
+                _rowCache.Clear();
+                _rowIndexByItem.Clear();
+                _didLazyLoadDuringCacheBuild = false;
+
+                float y = 0f;
+                AddRowsToCache(_root, ref y);
+                _totalContentHeight = y;
+
+                // Lazy loads can reveal children whose search matches haven't been evaluated yet
+                if (_didLazyLoadDuringCacheBuild && _isSearchActive)
+                {
+                    UpdateSearchMatches(_searchTerm);
+                    continue;
+                }
+
+                break;
+            }
+
+            ApplyPendingScrollIntoView();
+            ComputeDrawnRange();
+            ResolveDrawnArchetypes();
+        }
+
+        private void AddRowsToCache(DataPeekerModelItem parent, ref float y)
+        {
+            foreach (DataPeekerModelItem child in parent.Children)
+            {
+                if (IsVisibleInCurrentSearch(child) == false)
+                {
+                    continue;
+                }
+
+                float height = GetRowHeight(child);
+                _rowIndexByItem[child] = _rowCache.Count;
+                _rowCache.Add(new RowEntry { Item = child, Y = y, Height = height });
+                y += height;
+
+                if (IsExpandedForNavigation(child))
+                {
+                    if (child.EnsureChildrenLoaded())
+                    {
+                        _didLazyLoadDuringCacheBuild = true;
+                    }
+
+                    AddRowsToCache(child, ref y);
+                }
+            }
+        }
+
+        private float GetRowHeight(DataPeekerModelItem item)
+        {
+            float height = RowTopPadding + EditorGUIUtility.singleLineHeight + RowBottomPadding;
+            return item.IsBackingField ? height + BackingFieldExtraHeight : height;
+        }
+
+        private void ApplyPendingScrollIntoView()
+        {
+            if (_scrollSelectedItemIntoView == false)
+            {
+                return;
+            }
+
+            if (_selectedItem == null || _rowIndexByItem.TryGetValue(_selectedItem, out int rowIndex) == false)
+            {
+                _scrollSelectedItemIntoView = false;
+                return;
+            }
+
+            float viewportHeight = GetViewportHeight();
+            if (viewportHeight <= 0f)
+            {
+                return; // Window has no size yet; retry on the next Layout
+            }
+
+            const float scrollPadding = 4f;
+            RowEntry entry = _rowCache[rowIndex];
+            float selectedTop = entry.Y - scrollPadding;
+            float selectedBottom = entry.Y + entry.Height + scrollPadding;
+
+            if (selectedTop < _scrollPosition.y)
+            {
+                _scrollPosition.y = Mathf.Max(0f, selectedTop);
+            }
+            else if (selectedBottom > _scrollPosition.y + viewportHeight)
+            {
+                _scrollPosition.y = Mathf.Max(0f, selectedBottom - viewportHeight);
+            }
+
+            _scrollSelectedItemIntoView = false;
+        }
+
+        private float GetViewportHeight()
+        {
+            return _scrollViewRect.height > 0f ? _scrollViewRect.height : position.height;
+        }
+
+        private void ComputeDrawnRange()
+        {
+            if (_rowCache.Count == 0)
+            {
+                return;
+            }
+
+            float minY = _scrollPosition.y - ViewportOverscan;
+            float maxY = _scrollPosition.y + GetViewportHeight() + ViewportOverscan;
+
+            _firstDrawnRow = FindFirstRowBelow(minY);
+            _lastDrawnRow = _firstDrawnRow;
+
+            for (int i = _firstDrawnRow; i < _rowCache.Count && _rowCache[i].Y <= maxY; i++)
+            {
+                _lastDrawnRow = i;
+            }
+        }
+
+        private int FindFirstRowBelow(float minY)
+        {
+            int low = 0;
+            int high = _rowCache.Count - 1;
+            int result = _rowCache.Count - 1;
+
+            while (low <= high)
+            {
+                int mid = (low + high) / 2;
+
+                if (_rowCache[mid].Y + _rowCache[mid].Height >= minY)
+                {
+                    result = mid;
+                    high = mid - 1;
+                }
+                else
+                {
+                    low = mid + 1;
+                }
+            }
+
+            return result;
+        }
+
+        private void ResolveDrawnArchetypes()
+        {
+            for (int i = _firstDrawnRow; i >= 0 && i <= _lastDrawnRow && i < _rowCache.Count; i++)
+            {
+                RowEntry entry = _rowCache[i];
+                entry.Archetype = ResolveArchetype(entry.Item);
+                _rowCache[i] = entry;
+            }
+        }
+
+        private RowArchetype ResolveArchetype(DataPeekerModelItem item)
+        {
+            object currentValue = item.GetBoundValue();
+            Type currentType = currentValue?.GetType() ?? item.Type;
+
+            if (currentValue == null || IsSimpleTypeOrNamespace(currentType))
+            {
+                return RowArchetype.Label;
+            }
+
+            if (item.Type.IsGenericType && item.Type.GetGenericTypeDefinition() == typeof(Nullable<>))
+            {
+                return RowArchetype.Label;
+            }
+
+            if (item.Type == typeof(int)) return RowArchetype.EditableInt;
+            if (item.Type == typeof(float)) return RowArchetype.EditableFloat;
+            if (item.Type == typeof(string)) return RowArchetype.EditableString;
+            if (item.Type == typeof(bool)) return RowArchetype.EditableBool;
+            if (item.Type == typeof(Vector2)) return RowArchetype.EditableVector2;
+            if (item.Type == typeof(Vector3)) return RowArchetype.EditableVector3;
+            if (item.Type == typeof(Vector4)) return RowArchetype.EditableVector4;
+
+            if (typeof(IList).IsAssignableFrom(currentType)) return RowArchetype.FoldoutList;
+            if (typeof(IDictionary).IsAssignableFrom(currentType)) return RowArchetype.FoldoutDictionary;
+            if (CanHaveChildren(currentType)) return RowArchetype.FoldoutObject;
+
+            return RowArchetype.FallbackLabel;
         }
 
         private void DrawTopOptions()
@@ -733,171 +976,161 @@ namespace Kjub.DataPeeker.Editor
             return false;
         }
 
-        private void DisplayModelItem(DataPeekerModelItem item)
+        private void DrawRow(int rowIndex, Rect rowRect)
         {
-            object currentValue = item.GetBoundValue();
-            Type currentType = currentValue?.GetType() ?? item.Type;
+            RowEntry entry = _rowCache[rowIndex];
+            DataPeekerModelItem item = entry.Item;
 
-            EditorGUI.indentLevel = item.IndentLevel;
-            float labelHeight = EditorGUIUtility.singleLineHeight;
+            DrawRowBackground(rowRect, rowIndex, item);
 
-            // Calculate available space for the label
+            if (_isSearchActive && item.MatchesSearchSelf)
+            {
+                DrawFocusButton(GetRowHeaderRect(rowRect), item);
+            }
+
             float previousLabelWidth = EditorGUIUtility.labelWidth;
+            int previousIndentLevel = EditorGUI.indentLevel;
             EditorGUIUtility.labelWidth = 300;
+            EditorGUI.indentLevel = item.IndentLevel;
 
             try
             {
-                Rect rect = EditorGUILayout.BeginVertical(GetRowStyle(), GUILayout.ExpandWidth(true));
-                int rowIndex = _visibleRowIndex++;
-                DrawRowBackground(rect, rowIndex, item);
-                CacheSelectedItemRect(rect, item);
+                float lineY = rowRect.y + RowTopPadding;
 
-                if (_isSearchActive && item.MatchesSearchSelf)
+                if (item.IsBackingField)
                 {
-                    DrawFocusButton(GetRowHeaderRect(rect), item);
+                    DrawBackingFieldLabel(new Rect(rowRect.x, lineY, rowRect.width, EditorGUIUtility.singleLineHeight), item);
+                    lineY += BackingFieldExtraHeight;
                 }
 
-                GUILayout.Space(1f);
-
-                // Add some content to the vertical layout before calling GetLastRect
-                if (item.IsBackingField == true)
-                {
-                    CreateBackingFieldLabel(item);
-                }
-
-                EditorGUILayout.BeginVertical();
-
-                if (currentValue == null || IsSimpleTypeOrNamespace(currentType))
-                {
-                    string displayValue = currentValue == null ? "null" : currentValue.ToString();
-                    EditorGUILayout.LabelField(CreateIndentedLabel(item.IndentLevel, item.Name), displayValue, GUILayout.Height(labelHeight));
-
-                    DrawHierarchyLines(item.IndentLevel, rect);
-                    EditorGUILayout.EndVertical();
-                    EditorGUILayout.EndVertical();
-                    return;
-                }
-
-                if (item.Type.IsGenericType && item.Type.GetGenericTypeDefinition() == typeof(Nullable<>))
-                {
-                    EditorGUILayout.LabelField(CreateIndentedLabel(item.IndentLevel, item.Name), currentValue.ToString() ?? "null");
-                    DrawHierarchyLines(item.IndentLevel, rect);
-                    EditorGUILayout.EndVertical();
-                    EditorGUILayout.EndVertical();
-                    return;
-                }
-
-                DrawItemField(item, labelHeight);
-                DrawHierarchyLines(item.IndentLevel, rect);
-
-                EditorGUILayout.EndVertical();
-                EditorGUILayout.EndVertical();
+                Rect lineRect = new Rect(rowRect.x, lineY, rowRect.width, EditorGUIUtility.singleLineHeight);
+                DrawRowContent(entry, item, lineRect);
+                DrawHierarchyLines(item.IndentLevel, rowRect);
             }
             finally
             {
-                EditorGUIUtility.labelWidth = previousLabelWidth; // Restore the label width
+                EditorGUIUtility.labelWidth = previousLabelWidth;
+                EditorGUI.indentLevel = previousIndentLevel;
             }
         }
 
-        private void DrawItemField(DataPeekerModelItem item, float labelHeight)
+        private void DrawRowContent(RowEntry entry, DataPeekerModelItem item, Rect lineRect)
         {
-            // Handle different types with specific UI controls
-            GUILayoutOption[] guiLayoutOption = { GUILayout.Height(labelHeight), GUILayout.MinWidth(150) };
-
             string indentedLabel = CreateIndentedLabel(item.IndentLevel, item.Name);
-            Type currentType = item.Value?.GetType() ?? item.Type;
+            object currentValue = item.GetBoundValue();
 
-            // On live models the value can turn null between GUI passes; the editable branches below cast Value directly
-            if (item.Value == null)
+            switch (entry.Archetype)
             {
-                EditorGUILayout.LabelField(indentedLabel, "null", GUILayout.Height(labelHeight));
+                case RowArchetype.Label:
+                    EditorGUI.LabelField(lineRect, indentedLabel, currentValue == null ? "null" : currentValue.ToString());
+                    return;
+                case RowArchetype.FallbackLabel:
+                    EditorGUI.LabelField(lineRect, indentedLabel + ": " + currentValue);
+                    return;
+                case RowArchetype.FoldoutList:
+                case RowArchetype.FoldoutDictionary:
+                case RowArchetype.FoldoutObject:
+                    DrawFoldoutRow(lineRect, item, GetFoldoutLabel(entry.Archetype, item, currentValue));
+                    return;
+                default:
+                    DrawEditableRow(entry.Archetype, item, lineRect, indentedLabel, currentValue);
+                    return;
+            }
+        }
+
+        private string GetFoldoutLabel(RowArchetype archetype, DataPeekerModelItem item, object currentValue)
+        {
+            switch (archetype)
+            {
+                case RowArchetype.FoldoutList:
+                    return currentValue is IList list ? $"{item.Name} (List) [{list.Count}]" : $"{item.Name} (List)";
+                case RowArchetype.FoldoutDictionary:
+                    return currentValue is IDictionary dictionary ? $"{item.Name} (Dictionary) [{dictionary.Count}]" : $"{item.Name} (Dictionary)";
+                default:
+                    return $"{item.Name} ({item.Type.Name})";
+            }
+        }
+
+        private void DrawEditableRow(RowArchetype archetype, DataPeekerModelItem item, Rect lineRect, string indentedLabel, object currentValue)
+        {
+            // Live value can turn null between Layout and Repaint; the controls below need a concrete value
+            if (currentValue == null)
+            {
+                EditorGUI.LabelField(lineRect, indentedLabel, "null");
                 return;
             }
 
-            if (item.Type == typeof(int) || item.Type == typeof(int?))
+            EditorGUI.BeginChangeCheck();
+            object newValue = null;
+
+            switch (archetype)
             {
-                EditorGUILayout.BeginHorizontal();
-                EditorGUILayout.LabelField(indentedLabel, GUILayout.Height(labelHeight));
-                item.SetBoundValue(EditorGUILayout.IntField((int)item.Value, guiLayoutOption));
-                EditorGUILayout.EndHorizontal();
+                case RowArchetype.EditableInt:
+                    newValue = EditorGUI.IntField(lineRect, indentedLabel, (int)currentValue);
+                    break;
+                case RowArchetype.EditableFloat:
+                    newValue = EditorGUI.FloatField(lineRect, indentedLabel, (float)currentValue);
+                    break;
+                case RowArchetype.EditableString:
+                    newValue = EditorGUI.TextField(lineRect, indentedLabel, (string)currentValue);
+                    break;
+                case RowArchetype.EditableBool:
+                    newValue = EditorGUI.Toggle(lineRect, indentedLabel, (bool)currentValue);
+                    break;
+                case RowArchetype.EditableVector2:
+                    newValue = EditorGUI.Vector2Field(lineRect, indentedLabel, (Vector2)currentValue);
+                    break;
+                case RowArchetype.EditableVector3:
+                    newValue = EditorGUI.Vector3Field(lineRect, indentedLabel, (Vector3)currentValue);
+                    break;
+                case RowArchetype.EditableVector4:
+                    newValue = EditorGUI.Vector4Field(lineRect, indentedLabel, (Vector4)currentValue);
+                    break;
             }
-            else if (item.Type == typeof(float) || item.Type == typeof(float?))
+
+            if (EditorGUI.EndChangeCheck())
             {
-                item.SetBoundValue(EditorGUILayout.FloatField(indentedLabel, (float)item.Value, guiLayoutOption));
-            }
-            else if (item.Type == typeof(string))
-            {
-                item.SetBoundValue(EditorGUILayout.TextField(indentedLabel, (string)item.Value, guiLayoutOption));
-            }
-            else if (item.Type == typeof(bool) || item.Type == typeof(bool?))
-            {
-                item.SetBoundValue(EditorGUILayout.Toggle(indentedLabel, (bool)item.Value, guiLayoutOption));
-            }
-            else if (item.Type == typeof(Vector2) || item.Type == typeof(Vector2?))
-            {
-                EditorGUILayout.BeginHorizontal();
-                EditorGUILayout.LabelField(indentedLabel, GUILayout.Height(labelHeight));
-                item.SetBoundValue(EditorGUILayout.Vector2Field(GUIContent.none, (Vector2)item.Value, guiLayoutOption));
-                EditorGUILayout.EndHorizontal();
-            }
-            else if (item.Type == typeof(Vector3) || item.Type == typeof(Vector3?))
-            {
-                EditorGUILayout.BeginHorizontal();
-                EditorGUILayout.LabelField(indentedLabel, GUILayout.Height(labelHeight));
-                item.SetBoundValue(EditorGUILayout.Vector3Field(GUIContent.none, (Vector3)item.Value, guiLayoutOption));
-                EditorGUILayout.EndHorizontal();
-            }
-            else if (item.Type == typeof(Vector4) || item.Type == typeof(Vector4?))
-            {
-                EditorGUILayout.BeginHorizontal();
-                EditorGUILayout.LabelField(indentedLabel, GUILayout.Height(labelHeight));
-                item.SetBoundValue(EditorGUILayout.Vector4Field(GUIContent.none, (Vector4)item.Value, guiLayoutOption));
-                EditorGUILayout.EndHorizontal();
-            }
-            else if (typeof(IList).IsAssignableFrom(currentType))
-            {
-                DisplayListField(item);
-            }
-            else if (typeof(IDictionary).IsAssignableFrom(currentType))
-            {
-                DisplayDictionaryField(item);
-            }
-            else if (CanHaveChildren(currentType))
-            {
-                if (IsItemExpanded(item, $"{item.Name} ({item.Type.Name})"))
-                {
-                    RefreshSearchAfterLazyLoad(item.EnsureChildrenLoaded());
-                    DisplayModelHierarchy(item);
-                }
-            }
-            else
-            {
-                GUILayout.Label(indentedLabel + ": " + item.Value, guiLayoutOption);
-                GUILayout.Space(labelHeight);
+                item.SetBoundValue(newValue);
             }
         }
 
-        private void CreateBackingFieldLabel(DataPeekerModelItem item)
+        private void DrawFoldoutRow(Rect lineRect, DataPeekerModelItem item, string label)
+        {
+            Rect foldoutRect = GetFoldoutRect(lineRect, item.IndentLevel);
+
+            // Triangle area is handled by the foldout itself; clicking the rest of the line selects
+            Rect triangleRect = new Rect(foldoutRect.x, foldoutRect.y, FoldoutTriangleSize, FoldoutTriangleSize);
+            bool clickedLabel = lineRect.Contains(Event.current.mousePosition) && !triangleRect.Contains(Event.current.mousePosition);
+
+            if (Event.current.type == EventType.MouseDown && clickedLabel)
+            {
+                SelectItem(item);
+                Repaint();
+            }
+
+            int previousIndentLevel = EditorGUI.indentLevel;
+            EditorGUI.indentLevel = 0;
+
+            if (_isSearchActive)
+            {
+                item.IsExpandedBySearch = EditorGUI.Foldout(foldoutRect, item.IsExpandedBySearch, label, true);
+            }
+            else
+            {
+                item.IsExpanded = EditorGUI.Foldout(foldoutRect, item.IsExpanded, label, true);
+            }
+
+            EditorGUI.indentLevel = previousIndentLevel;
+        }
+
+        private void DrawBackingFieldLabel(Rect lineRect, DataPeekerModelItem item)
         {
             string itemName = item.Name[..1].ToLower() + item.Name[1..];
 
             Color defaultColor = GUI.color;
             GUI.color = _backingFieldColor;
-            EditorGUILayout.LabelField(CreateIndentedLabel(item.IndentLevel, $"_{itemName}"), GUILayout.Height(EditorGUIUtility.singleLineHeight));
+            EditorGUI.LabelField(lineRect, CreateIndentedLabel(item.IndentLevel, $"_{itemName}"));
             GUI.color = defaultColor;
-        }
-
-        private void DisplayModelHierarchy(DataPeekerModelItem root)
-        {
-            if (root == null) return;
-
-            foreach (DataPeekerModelItem item in root.Children)
-            {
-                if (_isSearchActive == false || (item.MatchesSearch == true && _isSearchActive == true))
-                {
-                    DisplayModelItem(item);
-                }
-            }
         }
 
         private void RefreshSearchAfterLazyLoad(bool didReloadChildren)
@@ -1147,32 +1380,15 @@ namespace Kjub.DataPeeker.Editor
 
         private List<DataPeekerModelItem> GetVisibleItems()
         {
-            List<DataPeekerModelItem> visibleItems = new List<DataPeekerModelItem>();
-            AddVisibleChildren(_root, visibleItems);
+            // The row cache from the last Layout event is exactly the flat visible-items list
+            List<DataPeekerModelItem> visibleItems = new List<DataPeekerModelItem>(_rowCache.Count);
+
+            foreach (RowEntry entry in _rowCache)
+            {
+                visibleItems.Add(entry.Item);
+            }
+
             return visibleItems;
-        }
-
-        private void AddVisibleChildren(DataPeekerModelItem root, List<DataPeekerModelItem> visibleItems)
-        {
-            if (root == null)
-            {
-                return;
-            }
-
-            foreach (DataPeekerModelItem child in root.Children)
-            {
-                if (IsVisibleInCurrentSearch(child) == false)
-                {
-                    continue;
-                }
-
-                visibleItems.Add(child);
-
-                if (IsExpandedForNavigation(child))
-                {
-                    AddVisibleChildren(child, visibleItems);
-                }
-            }
         }
 
         private bool IsVisibleInCurrentSearch(DataPeekerModelItem item)
@@ -1245,84 +1461,6 @@ namespace Kjub.DataPeeker.Editor
             Repaint();
         }
 
-        private void DisplayListField(DataPeekerModelItem item)
-        {
-            object itemValue = item.GetBoundValue();
-            IList list = itemValue as IList;
-            if (list == null)
-                return;
-
-            if (IsItemExpanded(item, $"{item.Name} (List) [{list.Count}]") == false)
-            {
-                return;
-            }
-
-            RefreshSearchAfterLazyLoad(item.EnsureChildrenLoaded());
-
-            foreach (DataPeekerModelItem child in item.Children)
-            {
-                if (_isSearchActive == false || child.MatchesSearch == true)
-                {
-                    DisplayModelItem(child);
-                }
-            }
-        }
-
-        private void DisplayDictionaryField(DataPeekerModelItem item)
-        {
-            object itemValue = item.GetBoundValue();
-            IDictionary dictionary = itemValue as IDictionary;
-            if (dictionary == null)
-                return;
-
-            if (IsItemExpanded(item, $"{item.Name} (Dictionary) [{dictionary.Count}]") == true)
-            {
-                RefreshSearchAfterLazyLoad(item.EnsureChildrenLoaded());
-                foreach (DataPeekerModelItem child in item.Children)
-                {
-                    if (_isSearchActive == false || child.MatchesSearch == true)
-                    {
-                        DisplayModelItem(child);
-                    }
-                }
-            }
-        }
-
-        private bool IsItemExpanded(DataPeekerModelItem item, string label)
-        {
-            if (item == null)
-                return false;
-
-            // Reserve space for the foldout
-            Rect itemRect = GUILayoutUtility.GetRect(18f, 18f, GUILayout.ExpandWidth(true));
-            Rect foldoutRect = GetFoldoutRect(itemRect, item.IndentLevel);
-
-            // Get triangle area manually (16x16 box on left), rest is label
-            Rect triangleRect = new Rect(foldoutRect.x, foldoutRect.y, FoldoutTriangleSize, FoldoutTriangleSize);
-            bool clickedLabel = itemRect.Contains(Event.current.mousePosition) && !triangleRect.Contains(Event.current.mousePosition);
-
-            // Handle selection if clicking the label (not the arrow)
-            if (Event.current.type == EventType.MouseDown && clickedLabel)
-            {
-                SelectItem(item);
-                Repaint();
-            }
-
-            // Draw the foldout
-            int previousIndentLevel = EditorGUI.indentLevel;
-            EditorGUI.indentLevel = 0;
-            if (_isSearchActive)
-            {
-                item.IsExpandedBySearch = EditorGUI.Foldout(foldoutRect, item.IsExpandedBySearch, label, true);
-                EditorGUI.indentLevel = previousIndentLevel;
-                return item.IsExpandedBySearch;
-            }
-
-            item.IsExpanded = EditorGUI.Foldout(foldoutRect, item.IsExpanded, label, true);
-            EditorGUI.indentLevel = previousIndentLevel;
-            return item.IsExpanded;
-        }
-
         private void OnDestroy()
         {
             EditorApplication.update -= OnEditorUpdate;
@@ -1341,40 +1479,27 @@ namespace Kjub.DataPeeker.Editor
             return new string(' ', indentLevel * 2) + label;
         }
 
-        private GUIStyle GetRowStyle()
-        {
-            if (_rowStyle == null)
-            {
-                _rowStyle = new GUIStyle(GUI.skin.box);
-                _rowStyle.normal.background = null;
-                _rowStyle.hover.background = null;
-                _rowStyle.active.background = null;
-                _rowStyle.focused.background = null;
-                _rowStyle.onNormal.background = null;
-                _rowStyle.onHover.background = null;
-                _rowStyle.onActive.background = null;
-                _rowStyle.onFocused.background = null;
-            }
-
-            return _rowStyle;
-        }
-
-        private void DrawHierarchyLines(int depth, Rect rect)
+        private void DrawHierarchyLines(int depth, Rect rowRect)
         {
             if (Event.current.type != EventType.Repaint || depth <= 0)
             {
                 return;
             }
 
-            int lineDepth = depth - 1;
-            float lineX = GetHierarchyLineX(lineDepth);
+            // Each row paints the full ancestor line stack for its own height; rows tile the
+            // y-axis without gaps, so the segments of adjacent rows join into continuous lines
+            for (int level = 0; level < depth; level++)
+            {
+                EditorGUI.DrawRect(new Rect(GetHierarchyLineX(level), rowRect.yMin, 2, rowRect.height), GetHierarchyLineColor(level));
+            }
+
+            int connectorLevel = depth - 1;
+            float lineX = GetHierarchyLineX(connectorLevel);
             float connectorEndX = GetFoldoutX(depth) - ConnectorEndPadding;
             float connectorWidth = Mathf.Max(0f, connectorEndX - lineX);
-            float rowCenterY = rect.yMin + GetRowStyle().padding.top + 1f + EditorGUIUtility.singleLineHeight * 0.5f;
-            Color lineColor = GetHierarchyLineColor(lineDepth);
+            float rowCenterY = rowRect.yMin + RowTopPadding + EditorGUIUtility.singleLineHeight * 0.5f;
 
-            EditorGUI.DrawRect(new Rect(lineX, rect.yMin, 2, rect.height), lineColor);
-            EditorGUI.DrawRect(new Rect(lineX, rowCenterY, connectorWidth, 2), lineColor);
+            EditorGUI.DrawRect(new Rect(lineX, rowCenterY, connectorWidth, 2), GetHierarchyLineColor(connectorLevel));
         }
 
         private Rect GetFoldoutRect(Rect rowRect, int depth)
@@ -1413,55 +1538,6 @@ namespace Kjub.DataPeeker.Editor
             }
         }
 
-        private void CacheSelectedItemRect(Rect rect, DataPeekerModelItem item)
-        {
-            if (Event.current.type != EventType.Repaint || _selectedItem != item)
-            {
-                return;
-            }
-
-            _selectedItemRect = GetRowHeaderRect(rect);
-            _didFindSelectedItemRect = true;
-        }
-
-        private void ScrollSelectedItemIntoViewIfNeeded()
-        {
-            if (_scrollSelectedItemIntoView == false || _didFindSelectedItemRect == false)
-            {
-                return;
-            }
-
-            float viewportHeight = _scrollViewRect.height > 0f ? _scrollViewRect.height : position.height;
-            if (viewportHeight <= 0f)
-            {
-                return;
-            }
-
-            const float scrollPadding = 4f;
-            float selectedTop = _selectedItemRect.yMin - scrollPadding;
-            float selectedBottom = _selectedItemRect.yMax + scrollPadding;
-            float viewportTop = _scrollPosition.y;
-            float viewportBottom = viewportTop + viewportHeight;
-
-            if (selectedTop < viewportTop)
-            {
-                _scrollPosition.y = Mathf.Max(0f, selectedTop);
-                _scrollSelectedItemIntoView = false;
-                Repaint();
-                return;
-            }
-
-            if (selectedBottom > viewportBottom)
-            {
-                _scrollPosition.y = Mathf.Max(0f, selectedBottom - viewportHeight);
-                _scrollSelectedItemIntoView = false;
-                Repaint();
-                return;
-            }
-
-            _scrollSelectedItemIntoView = false;
-        }
-
         private void DrawSelectionBackground(Rect rect)
         {
             Rect headerRect = GetRowHeaderRect(rect);
@@ -1471,8 +1547,7 @@ namespace Kjub.DataPeeker.Editor
 
         private Rect GetRowHeaderRect(Rect rect)
         {
-            GUIStyle rowStyle = GetRowStyle();
-            float y = rect.yMin + rowStyle.padding.top;
+            float y = rect.yMin + RowTopPadding - 1f;
             float height = EditorGUIUtility.singleLineHeight + 2f;
             return new Rect(rect.xMin, y, rect.width, height);
         }

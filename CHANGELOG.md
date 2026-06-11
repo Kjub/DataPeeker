@@ -1,5 +1,12 @@
 # Changelog
 
+### [0.5.0] - 2026-06-11
+
+#### Changed
+ - Virtualized row rendering — only rows inside the scroll viewport are drawn, so large models no longer slow the window down
+ - Value fields write back only when actually edited instead of every frame
+ - Scroll-to-selection now works even when the target is far offscreen
+
 ### [0.4.3] - 2026-06-11
 
 #### Added
